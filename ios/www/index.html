@@ -2315,7 +2315,10 @@ function retryPunch(){
     dlog('重连·好友自愈：' + (s.title || peer));
     try { lanDial(s); } catch (e) {}
     try { friendListen(s); friendReconnect(s); } catch (e) {}
-    toast('正在通过中枢重连…');
+    // 第三轨：不管中枢地址变没变，都可以经公共中继按 ECDH 频道换 SDP
+    let _relayTried = false;
+    try { if (relayOn()) { relayWaitFriend(s); relayDialFriend(s); _relayTried = true; } } catch (e) {}
+    toast(_relayTried ? '正在重连：中枢 + 公共中继' : '正在通过中枢重连…');
     renderChat(s);
     return;
   }
@@ -10690,7 +10693,7 @@ async function pubConnect(){
 }
 
 /* ==================== 事件绑定 ==================== */
-const BUILD_STAMP = '2026-11-21 16:20';
+const BUILD_STAMP = '2026-11-21 16:50';
 
 // 自检更新：服务器上的 index.html 版本号和当前页面不一致时，用带时间戳的地址强制重载一次
 (function selfUpdateCheck(){
@@ -15489,6 +15492,32 @@ async function idSign(text){
   const sig = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, k.priv, new TextEncoder().encode(String(text)));
   return bufToHex(sig);
 }
+/** 用本机私钥做 ECDH，和对方身份公钥派生共享密钥（hex）——两台设备算出来一样，别人算不出 */
+async function idEcdhHex(peerPubJwk){
+  try {
+    const k = await ensureIdentityKey();
+    if (!k || !peerPubJwk) return '';
+    let raw = null;
+    try { raw = JSON.parse(localStorage.getItem(IDKEY_STORE) || 'null'); } catch (e) { raw = null; }
+    if (!raw || !raw.priv) return '';
+    const clean = function (j) {
+      const o = JSON.parse(JSON.stringify(j || {}));
+      delete o.key_ops; delete o.use; delete o.alg; delete o.ext;
+      return o;
+    };
+    const priv = await crypto.subtle.importKey('jwk', clean(raw.priv),
+      { name: 'ECDH', namedCurve: 'P-256' }, false, ['deriveBits']);
+    const pub = await crypto.subtle.importKey('jwk', clean(peerPubJwk),
+      { name: 'ECDH', namedCurve: 'P-256' }, false, []);
+    const bits = await crypto.subtle.deriveBits({ name: 'ECDH', public: pub }, priv, 256);
+    return bufToHex(bits);
+  } catch (e) {
+    try { dlog('ECDH 派生失败：' + e.message); } catch (x) {}
+    return '';
+  }
+}
+try { window.idEcdhHex = idEcdhHex; } catch (e) {}
+
 /** 用对方公钥验签 */
 async function idVerify(pubJwk, text, sigHex){
   try {
@@ -24191,9 +24220,22 @@ function pairTopicOf(session){
   const a = String(state.me.id || '');
   const b = String(session.peerId || '');
   const sc = String(session.safetyCode || '').replace(/[^0-9A-Fa-f]/g, '');
-  if (!b || !sc) return null;
-  const pair = [a, b].sort().join('|') + '|' + sc.toUpperCase();
-  return relayTopic('pair', pair);
+  if (!b) return null;
+  if (sc) {
+    const pair = [a, b].sort().join('|') + '|' + sc.toUpperCase();
+    return relayTopic('pair', pair);
+  }
+  // 没有安全码的好友：用身份公钥做 ECDH 派生频道名 —— 只有这两台设备能算出来，
+  // 这样"识别过的设备"能绕过中枢地址变化，直接经公共中继换 SDP 重连。
+  try {
+    const f = (state.friends || []).find(x => x.id === b);
+    const pubJwk = (f && f.pub) || session.peerPub || null;
+    if (!pubJwk) return null;
+    return idEcdhHex(pubJwk).then(function (sec) {
+      if (!sec) return null;
+      return relayTopic('pair', [a, b].sort().join('|') + '|' + sec);
+    });
+  } catch (e) { return null; }
 }
 
 async function relaySignalPut(topic, obj){
