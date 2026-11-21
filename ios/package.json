@@ -1,0 +1,17 @@
+{
+  "name": "hljjs-ios",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "refresh": "node -e \"require('fs').copyFileSync('../index.html','www/index.html');console.log('www/index.html 已同步')\"",
+    "sync": "npx cap sync ios",
+    "open": "npx cap open ios"
+  },
+  "dependencies": {
+    "@capacitor/core": "^6.1.0",
+    "@capacitor/ios": "^6.1.0"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^6.1.0"
+  }
+}

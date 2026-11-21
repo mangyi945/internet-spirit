@@ -26,3 +26,6 @@ Thumbs.db
 .DS_Store
 desktop.ini
 *.apk
+*.nes
+ios/node_modules/
+ios/ios/

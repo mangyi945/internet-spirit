@@ -22,6 +22,8 @@
 | `tools/adb_watch.ps1` | USB 掉线自动恢复 | 后台常驻 |
 | `tools/cdp.mjs` | 真机页面调试（Chrome DevTools Protocol）小工具 | 被其他脚本 import |
 | `tools/syntax_check.mjs` | 检查 `index.html` 里的 JS 语法 | `node tools/syntax_check.mjs` |
+| `ios/` | iOS 壳（Capacitor + WKWebView） | `cd ios && npm install && npx cap add ios` |
+| `.github/workflows/ios.yml` | 在 GitHub Actions（macos-14）上打未签名 IPA | Actions 里手动 Run |
 | `SECURITY.md` | 威胁模型、部署建议、漏洞披露 | — |
 
 ## 运行
@@ -42,16 +44,50 @@ powershell -ExecutionPolicy Bypass -File tools/bt_build_install.ps1 -Stamp "2026
 
 改完 `index.html` 先跑 `node tools/syntax_check.mjs`。`.ps1` 文件保存为 UTF-8 带 BOM。
 
+## iOS
+
+`ios/` 是把同一份 `www/index.html` 包进 WKWebView 的 Capacitor 壳。
+
+```bash
+cd ios
+npm install
+npx cap add ios      # 第一次
+npx cap sync ios
+npx cap open ios     # 有 Mac 时用 Xcode 签名出 IPA
+```
+
+没有 Mac：仓库自带 `.github/workflows/ios.yml`，在 Actions 里跑一次会在 `macos-14` 上
+产出**未签名 IPA**（artifact `hljjs-ios-ipa`），下载后自己签名安装。
+
+**iOS 的限制（系统原因）**：不能在本机起中枢（跑不了 Python / cloudflared），
+所以 **iOS 只能连别人已经开好的中枢，不能自己开公网当中枢**。App 里会自动隐藏相关按钮。
+
 ## 公网中枢
 
-`serve.py` 可以放到公网机器上当会合点（信令、房间、文件中转）：
+顺序是：**① 先在公网机器上把中枢跑起来 → ② 客户端再填地址连过去**。
 
-- VPS：`python serve.py 8642`，前面用 Caddy/nginx 反代到 443
-- 家里电脑：Cloudflare 隧道、frp、Tailscale 之类映射 8642
-- 客户端在「构建中枢」页填中枢地址
+**第 1 步：部署中枢**（任选一种）
 
-相关环境变量：`HLJJS_BIND=127.0.0.1`（只监听本机）、`HLJJS_HTTPS_CERT` / `HLJJS_HTTPS_KEY`（自带证书）、
-`HLJJS_ADMIN_TOKEN`（管理令牌，默认生成在 `~/.hljjs-hub/admin-token.txt`）、`HLJJS_HUB_DATA`（数据目录）。
+```bash
+# VPS / 家里电脑 / 软路由，直接跑
+python serve.py 8642
+```
+
+- VPS：前面用 Caddy 或 nginx 反代到 443（Caddy 三行就够）
+- 家里电脑：用 Cloudflare 隧道 / frp / Tailscale 把 8642 映射出去
+- 手机（Android）：App 里有「手机中枢」，会在手机本地起同一个 `serve.py`
+
+**第 2 步：客户端连接**
+
+1. 打开 App 或网页 →「构建中枢」页
+2. 「中枢地址」填 `https://你的域名`（或 `http://IP:8642`）
+3. 保存。之后房间/社团、跨网络的文件中转都会走这台中枢；能 P2P 直连时仍走直连
+
+**注意事项**
+
+- 管理接口需要令牌：默认生成在 `~/.hljjs-hub/admin-token.txt`，也可用 `HLJJS_ADMIN_TOKEN` 指定
+- 相关环境变量：`HLJJS_BIND=127.0.0.1`（只监听本机）、`HLJJS_HTTPS_CERT` / `HLJJS_HTTPS_KEY`（自带证书）、`HLJJS_HUB_DATA`（数据目录）
+- 中转文件落在 `store/`，注意磁盘和流量
 
 ## 第三方组件
 
@@ -59,6 +95,5 @@ libtorrent4j（BSD-3-Clause）、OpenSSL、Boost、libdatachannel、jsnes（MIT�
 
 ## 说明
 
-- `builtin/final-mission.nes` 是第三方 ROM，版权归原权利人，仅作本地演示。
-- 仓库不含用户数据。
+- 仓库不含第三方 ROM，也不含用户数据；内置游戏请自备 ROM 放进 `builtin/`。
 - 未附开源许可证。

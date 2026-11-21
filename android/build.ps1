@@ -60,6 +60,9 @@ foreach ($f in 'index.html', 'browser_chrome.html', 'manifest.webmanifest', 'sw.
 }
 if (Test-Path (Join-Path $web 'builtin')) {
   Copy-Item -LiteralPath (Join-Path $web 'builtin') -Destination $www -Recurse -Force
+  # 第三方 ROM（版权原因）不打包进 APK；用户自己的 ROM 请放 builtin/ 后自行改这一行
+  Get-ChildItem -LiteralPath (Join-Path $www 'builtin') -Recurse -File -Filter *.nes -ErrorAction SilentlyContinue |
+    Remove-Item -Force -ErrorAction SilentlyContinue
 }
 if (Test-Path (Join-Path $web 'plugins')) {
   Copy-Item -LiteralPath (Join-Path $web 'plugins') -Destination $www -Recurse -Force

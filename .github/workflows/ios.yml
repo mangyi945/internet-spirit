@@ -1,0 +1,70 @@
+name: build-ios-ipa
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'ios/**'
+      - '.github/workflows/ios.yml'
+
+jobs:
+  build:
+    runs-on: macos-14
+    defaults:
+      run:
+        working-directory: ios
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: npm install
+        run: npm install
+
+      - name: cap add ios（第一次才有，之后忽略）
+        run: npx cap add ios || true
+
+      - name: cap sync
+        run: npx cap sync ios
+
+      - name: 补 Info.plist（相机/麦克风/相册/本地网络）
+        run: |
+          PL=ios/App/App/Info.plist
+          /usr/libexec/PlistBuddy -c "Add :NSCameraUsageDescription string '扫描二维码 / 视频通话需要相机'" "$PL" || true
+          /usr/libexec/PlistBuddy -c "Add :NSMicrophoneUsageDescription string '语音通话 / 录音需要麦克风'" "$PL" || true
+          /usr/libexec/PlistBuddy -c "Add :NSPhotoLibraryUsageDescription string '选择图片作为头像 / 发送文件'" "$PL" || true
+          /usr/libexec/PlistBuddy -c "Add :NSPhotoLibraryAddUsageDescription string '保存图片 / 文件'" "$PL" || true
+          /usr/libexec/PlistBuddy -c "Add :NSLocalNetworkUsageDescription string '连接同一 Wi-Fi 下的好友和中枢'" "$PL" || true
+          /usr/libexec/PlistBuddy -c "Add :NSAppTransportSecurity dict" "$PL" || true
+          /usr/libexec/PlistBuddy -c "Add :NSAppTransportSecurity:NSAllowsArbitraryLoads bool true" "$PL" || true
+          /usr/libexec/PlistBuddy -c "Add :NSAppTransportSecurity:NSAllowsLocalNetworking bool true" "$PL" || true
+          /usr/libexec/PlistBuddy -c "Add :UIBackgroundModes array" "$PL" || true
+          /usr/libexec/PlistBuddy -c "Add :UIBackgroundModes:0 string audio" "$PL" || true
+          plutil -p "$PL" | head -40
+
+      - name: xcodebuild（不签名）
+        run: |
+          cd ios/App
+          xcodebuild -workspace App.xcworkspace -scheme App \
+            -configuration Release -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: 打成未签名 IPA
+        run: |
+          cd ios/App
+          rm -rf Payload App-unsigned.ipa
+          mkdir -p Payload
+          cp -R build/Build/Products/Release-iphoneos/App.app Payload/
+          zip -qry App-unsigned.ipa Payload
+          ls -lh App-unsigned.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hljjs-ios-ipa
+          path: ios/ios/App/App-unsigned.ipa
+          retention-days: 30

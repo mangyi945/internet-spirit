@@ -1,0 +1,12 @@
+﻿{
+  "appId": "com.hljjs.app",
+  "appName": "互联网精神与世长存",
+  "webDir": "www",
+  "ios": {
+    "contentInset": "never",
+    "limitsNavigationsToAppBoundDomains": false
+  },
+  "server": {
+    "iosScheme": "capacitor"
+  }
+}
