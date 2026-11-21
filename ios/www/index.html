@@ -916,8 +916,8 @@ body{color:var(--ink,#000)}
         <div class="panel-title">建立连接</div>
 
         <div class="seg" id="mode-seg">
-          <button class="seg-btn active" data-mode="manual">手动暗号</button>
           <button class="seg-btn" data-mode="public">公网</button>
+          <button class="seg-btn active" data-mode="manual">手动暗号</button>
           <button class="seg-btn" data-mode="sms">短信搭桥</button>
           <button class="seg-btn" data-mode="bt">蓝牙</button>
           <button class="seg-btn" data-mode="usb">数据线</button>
@@ -936,10 +936,14 @@ body{color:var(--ink,#000)}
           </div>
           <label class="lbl" style="margin-top:8px">我的公网地址</label>
           <div class="row" style="gap:4px;align-items:center">
-            <input id="pub-mine" type="text" readonly placeholder="未开启（到「构建中枢」页点「一键开公网」）" style="flex:1 1 auto">
+            <input id="pub-mine" type="text" readonly placeholder="未开启（点下面的「电脑公网：开/关」）" style="flex:1 1 auto">
             <button class="bevel small" id="pub-mine-copy">复制</button>
             <button class="bevel small" id="pub-mine-refresh">刷新</button>
           </div>
+          <div class="row" style="gap:4px;margin-top:8px;flex-wrap:wrap">
+            <button class="bevel small" id="pub-pc">电脑公网：开/关</button>
+          </div>
+          <div class="hint" id="pub-msg" style="margin:4px 0 0">公网通道：未开启</div>
           <p class="hint" style="margin:2px 0 0;white-space:normal">把这里显示的地址发给好友，让 TA 填到上面「对方公网地址」里。</p>
           <p class="hint" id="pub-info" style="white-space:pre-wrap;margin-top:4px"></p>
           <p class="hint" style="margin:2px 0 0;white-space:normal">地址只发给好友；对方中枢最好开着门禁/口令。填完地址后，会合点会自动切换成它。</p>
@@ -1514,12 +1518,10 @@ body{color:var(--ink,#000)}
       <div class="panel">
         <div class="panel-title">构建中枢</div>
         <div id="hub-status">正在检查…</div>
+        <p class="hint" style="margin:6px 0 0;white-space:normal">开关公网入口挪到了「连接 → 公网」页，那里有「电脑公网：开/关」和当前通道状态。</p>
         <div class="row" style="margin-top:6px;gap:4px;flex-wrap:wrap">
-          <button class="bevel small" id="pub-pc">电脑公网：开/关</button>
-          <button class="bevel small" id="pub-copy">复制公网地址</button>
           <button class="bevel small" id="pub-phonehub" style="display:none">手机一键部署公网</button>
         </div>
-        <div class="hint" id="pub-msg" style="margin:4px 0 0">公网通道：未开启</div>
         <div class="row" style="align-items:center;gap:6px;margin-top:8px"><span>上传限速</span><input id="hub-upkbps" type="number" min="0" step="64" placeholder="0" style="width:90px"><span class="hint" style="margin:0">KB/s（0 或空 = 不限速）</span></div>
       </div>
     </section>
@@ -10583,7 +10585,7 @@ async function pubLoadMine(){
     const j = await r.json().catch(function () { return null; });
     const u = (j && j.url) || '';
     inp.value = u;
-    inp.placeholder = u ? '' : '未开启（到「构建中枢」页点「一键开公网」）';
+    inp.placeholder = u ? '' : '未开启（点下面的「电脑公网：开/关」）';
     return u;
   } catch (e) {
     inp.value = '';
@@ -10594,7 +10596,7 @@ async function pubLoadMine(){
 function pubCopyMine(){
   const inp = document.getElementById('pub-mine');
   const u = String((inp && inp.value) || '').trim();
-  if (!u) return toast('还没开公网，先到「构建中枢」页点「一键开公网」');
+  if (!u) return toast('还没开公网，先点上面的「电脑公网：开/关」');
   try { copyText(u); toast('公网地址已复制'); } catch (e) { toast('复制失败'); }
 }
 function pubNormalize(s){
@@ -10646,7 +10648,7 @@ async function pubConnect(){
 }
 
 /* ==================== 事件绑定 ==================== */
-const BUILD_STAMP = '2026-11-21 14:35';
+const BUILD_STAMP = '2026-11-21 14:55';
 
 // 自检更新：服务器上的 index.html 版本号和当前页面不一致时，用带时间戳的地址强制重载一次
 (function selfUpdateCheck(){
@@ -28511,15 +28513,6 @@ if (window.AndroidApp && !AndroidApp.phoneHubStart) {
       try { ph.textContent = hubAlive() ? '一键开关公网（当前已开）' : '一键开关公网'; } catch (e) {}
     }
   }
-  bind('pub-copy', async function () {
-    try {
-      var st = await ctl('/status', 5000);
-      var u = (st && st.public) || '';
-      if (!u) { say('还没开公网'); return; }
-      await navigator.clipboard.writeText(u);
-      say(u + '（已复制）');
-    } catch (e) { say('失败：' + e.message); }
-  });
 
   ctl('/status', 5000).then(function (st) {
     say((st && st.public) ? st.public : '未开启');
