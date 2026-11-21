@@ -3944,6 +3944,11 @@ async function hubSnapshot(){
   try {
     const st = await hubApi(base + '/__hub/state');
     if (st && st.ok) {
+      // 记住这个中枢的身份 id：以后地址变了（换隧道/换网），只要局域网里还能听到同 id 的中枢就能自愈
+      try {
+        const hid = String((st.cfg && st.cfg.id) || '');
+        if (hid && hid !== state.settings.hubId) { state.settings.hubId = hid; try { save(); } catch (e) {} }
+      } catch (e) {}
       out.hubAlive = !!st.open;
       out.tunnel = st.public || '';
       const loop = hubLoopUrl(base);
@@ -10663,7 +10668,7 @@ async function pubConnect(){
 }
 
 /* ==================== 事件绑定 ==================== */
-const BUILD_STAMP = '2026-11-21 17:25';
+const BUILD_STAMP = '2026-11-21 17:50';
 
 // 自检更新：服务器上的 index.html 版本号和当前页面不一致时，用带时间戳的地址强制重载一次
 (function selfUpdateCheck(){
@@ -14814,7 +14819,8 @@ function signalRemember(url){
   try { scheduleSave(); } catch (e) {}
 }
 /** 候选顺序：用户设的 > 历史能用的 > 平台兜底 */
-/* 局域网里的中枢（用来给「自愈」当候选）：向当前中枢要 /__lan/hubs */
+/* 局域网里的中枢（用来给「自愈」当候选）：向当前中枢要 /__lan/hubs
+   记住中枢 id：地址换了但 id 没变，那就是同一个中枢，优先回去。 */
 let LAN_HUBS_CACHE = [];
 async function lanHubsRefresh(){
   const bases = [];
@@ -14828,7 +14834,14 @@ async function lanHubsRefresh(){
       clearTimeout(t);
       const j = await r.json();
       const list = (j && Array.isArray(j.hubs)) ? j.hubs : [];
-      LAN_HUBS_CACHE = list.map(h => h && h.url).filter(Boolean);
+      const want = String((state.settings && state.settings.hubId) || '');
+      const rows = list.filter(h => h && h.url).map(h => ({ url: h.url, id: h.id || '', fp: h.fp || '', name: h.name || '' }));
+      rows.sort(function (a, b2) {
+        const am = (want && (a.id === want)) ? 0 : 1;
+        const bm = (want && (b2.id === want)) ? 0 : 1;
+        return am - bm;
+      });
+      LAN_HUBS_CACHE = rows;
       return LAN_HUBS_CACHE;
     } catch (e) {}
   }
@@ -14843,7 +14856,7 @@ function signalCandidates(){
   };
   push(state.settings.signalBase);
   signalKnownList().forEach(push);
-  LAN_HUBS_CACHE.forEach(push);
+  LAN_HUBS_CACHE.forEach(h => push(h && h.url ? h.url : h));
   // 本机中枢只作为「兜底」：已经配了别的中枢时，不要静默切回本机（否则看起来连上了、其实连的是自己）
   const own = location.origin.replace(/\/+$/, '');
   const curBase = String(state.settings.signalBase || '').replace(/\/+$/, '');

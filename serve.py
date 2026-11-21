@@ -758,7 +758,11 @@ def lan_hub_listen_loop():
                 except Exception:
                     pass
                 with SIGNAL_LOCK:
-                    LAN_HUBS[ip] = {'url': parts[1].rstrip('/'), 'name': (parts[2] if len(parts) > 2 else ''), 'at': time.time()}
+                    LAN_HUBS[ip] = {'url': parts[1].rstrip('/'),
+                                    'name': (parts[2] if len(parts) > 2 else ''),
+                                    'id': (parts[3] if len(parts) > 3 else ''),
+                                    'fp': (parts[4] if len(parts) > 4 else ''),
+                                    'at': time.time()}
         except Exception:
             try:
                 if so is not None:
@@ -766,6 +770,47 @@ def lan_hub_listen_loop():
             except Exception:
                 so = None
             time.sleep(1)
+
+def hub_peer_heal_loop():
+    """串联中枢按身份自愈：地址挂了，但局域网里还能听到同一个中枢 id，就把 URL 换过来。"""
+    time.sleep(10)
+    while True:
+        try:
+            with HUB_PEER_LOCK:
+                peers = [dict(v) for v in HUB_PEERS.values()]
+            for p in peers:
+                pid = str(p.get('id') or '')
+                url = str(p.get('url') or '').rstrip('/')
+                if not pid or not url:
+                    continue
+                alive = False
+                try:
+                    hub_http_json(url + '/__info', timeout=3)
+                    alive = True
+                except Exception:
+                    alive = False
+                if alive:
+                    continue
+                now4 = time.time()
+                newurl = ''
+                with SIGNAL_LOCK:
+                    for _ip, h in LAN_HUBS.items():
+                        if h.get('id') != pid:
+                            continue
+                        if now4 - float(h.get('at') or 0) > 120:
+                            continue
+                        newurl = str(h.get('url') or '')
+                        break
+                if newurl and newurl != url:
+                    hub_peer_add(pid, newurl, p.get('name'), p.get('key'), p.get('pub'), p.get('fp'), p.get('verified'))
+                    try:
+                        print('[hub] 串联自愈：%s %s -> %s' % (p.get('name') or pid, url, newurl))
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        time.sleep(20)
+
 
 def lan_beacon_loop():
     """持续往局域网广播自己的地址，手机 App 收到后自动把这里设为服务节点。"""
@@ -779,7 +824,13 @@ def lan_beacon_loop():
         return
     msg_base = 'HLJJS1|http://%s:%d|' % (_ip, PORT)
     name = LAN_BEACON_NAME or os.environ.get('COMPUTERNAME') or 'PC'
-    msg = (msg_base + name).encode('utf-8')
+    try:
+        _cfg = hub_cfg()
+        _bid = str(_cfg.get('id') or '')
+        _bfp = str(HUB_KEY.get('fp') or '')
+    except Exception:
+        _bid, _bfp = '', ''
+    msg = (msg_base + name + '|' + _bid + '|' + _bfp).encode('utf-8')
     so = _sock.socket(_sock.AF_INET, _sock.SOCK_DGRAM)
     try:
         so.setsockopt(_sock.SOL_SOCKET, _sock.SO_BROADCAST, 1)
@@ -3808,6 +3859,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         LAN_HUBS.pop(ip, None)
                         continue
                     out.append({'url': v.get('url', ''), 'name': v.get('name', ''), 'ip': ip,
+                                'id': v.get('id', ''), 'fp': v.get('fp', ''),
                                 'age': int(now3 - v.get('at', now3))})
             body = json.dumps({'ok': True, 'hubs': out}, ensure_ascii=False).encode('utf-8')
             try:
@@ -4720,6 +4772,10 @@ if __name__ == "__main__":
         pass
     try:
         threading.Thread(target=lan_hub_listen_loop, daemon=True).start()
+    except Exception:
+        pass
+    try:
+        threading.Thread(target=hub_peer_heal_loop, daemon=True).start()
     except Exception:
         pass
     try:
