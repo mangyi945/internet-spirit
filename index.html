@@ -927,7 +927,6 @@ body{color:var(--ink,#000)}
 
 
         <div id="pane-public" hidden>
-          <p class="hint" style="margin:0 0 6px">填对方的公网地址：cloudflared 域名（<code>https://xxx.trycloudflare.com</code>）或 IP:端口（<code>1.2.3.4:8642</code>，自动补 http://）。连上后用它当会合点，再用暗号/名片建立 1:1。</p>
           <label class="lbl">对方公网地址</label>
           <input id="pub-url" type="text" spellcheck="false" placeholder="https://xxx.trycloudflare.com 或 1.2.3.4:8642">
           <div class="row" style="gap:6px;margin-top:4px;align-items:center">
@@ -945,9 +944,7 @@ body{color:var(--ink,#000)}
             <button class="bevel small" id="pub-phonehub" style="display:none">手机一键部署公网</button>
           </div>
           <div class="hint" id="pub-msg" style="margin:4px 0 0">公网通道：未开启</div>
-          <p class="hint" style="margin:2px 0 0;white-space:normal">把这里显示的地址发给好友，让 TA 填到上面「对方公网地址」里。</p>
           <p class="hint" id="pub-info" style="white-space:pre-wrap;margin-top:4px"></p>
-          <p class="hint" style="margin:2px 0 0;white-space:normal">地址只发给好友；对方中枢最好开着门禁/口令。填完地址后，会合点会自动切换成它。</p>
         </div>
 
         <div id="pane-sms" hidden>
@@ -10651,7 +10648,7 @@ async function pubConnect(){
 }
 
 /* ==================== 事件绑定 ==================== */
-const BUILD_STAMP = '2026-11-21 15:40';
+const BUILD_STAMP = '2026-11-21 15:55';
 
 // 自检更新：服务器上的 index.html 版本号和当前页面不一致时，用带时间戳的地址强制重载一次
 (function selfUpdateCheck(){
