@@ -865,6 +865,7 @@ body{color:var(--ink,#000)}
           <button class="bevel" id="btn-members" hidden>成员</button>
           <button class="bevel" id="btn-multi" title="多选转发">多选</button>
           <button class="bevel" id="btn-search" title="搜索消息">搜索</button>
+          <button class="bevel" id="btn-solo" title="专注：只保留这个会话的连接，其余全部断开（省电省流量）">专注</button>
           <button class="bevel" id="btn-more" title="更多">···</button>
         </div>
       </div>
@@ -10708,7 +10709,7 @@ async function pubConnect(){
 }
 
 /* ==================== 事件绑定 ==================== */
-const BUILD_STAMP = '2026-11-21 17:35';
+const BUILD_STAMP = '2026-11-21 17:50';
 
 // 自检更新：服务器上的 index.html 版本号和当前页面不一致时，用带时间戳的地址强制重载一次
 (function selfUpdateCheck(){
@@ -10856,6 +10857,10 @@ function bindUI(){
   }
   const sBtn = $('#btn-search');
   if (sBtn) sBtn.onclick = function () { chatSearchToggle(); };
+  const soloBtn = $('#btn-solo');
+  if (soloBtn) soloBtn.onclick = function () {
+    try { soloToggle(state.activeSid); } catch (e) { toast('专注切换失败：' + e.message); }
+  };
   const sIn = $('#chat-search-in');
   if (sIn) sIn.addEventListener('keydown', function (e) { if (e.key === 'Enter') { try { chatSearchRun(); } catch (x) {} } });
   const sNext = $('#chat-search-next');
@@ -18101,6 +18106,49 @@ function npArm(){
 /* ==================== 漫画阅读器 ====================
    直接读 .zip / .cbz 里的图片，也可以单张图片。
    进度、单双页、方向、缩放方式都记在本机。 */
+/* ---- 会话专注（SOLO）：只保留当前会话的连接，其余全断（省电/省流量） ---- */
+const SOLO = { on: false, sid: '' };
+function soloUI(){
+  try {
+    const b = document.getElementById('btn-solo');
+    if (b) { b.textContent = SOLO.on ? '专注中' : '专注'; b.style.fontWeight = SOLO.on ? 'bold' : 'normal'; }
+  } catch (e) {}
+}
+function soloCloseOthers(sid){
+  (state.sessions || []).forEach(function (s) {
+    if (!s || s.sid === sid) return;
+    (s.links || []).slice().forEach(function (l) {
+      try { if (l.dc) l.dc.close(); } catch (e) {}
+      try { if (l.pc) l.pc.close(); } catch (e) {}
+      try { clearInterval(l._hb); } catch (e) {}
+      try { clearInterval(l._helloTimer); } catch (e) {}
+    });
+    s.links = [];
+    try { clearInterval(s._openT); } catch (e) {}
+    s._openT = 0;
+    try { if (s.ws && s.ws.sock) s.ws.sock.close(); } catch (e) {}
+    s._soloHold = true;
+  });
+}
+function soloToggle(sid){
+  sid = sid || state.activeSid || '';
+  if (!sid) return toast('先打开一个会话');
+  if (SOLO.on && SOLO.sid === sid) {
+    SOLO.on = false; SOLO.sid = '';
+    (state.sessions || []).forEach(function (s) { s._soloHold = false; });
+    soloUI();
+    toast('已退出专注，正在恢复其它连接');
+    try { friendRecoverNow('退出专注'); } catch (e) {}
+    try { if (typeof signalAutoHeal === 'function') signalAutoHeal(); } catch (e) {}
+    return;
+  }
+  SOLO.on = true; SOLO.sid = sid;
+  soloCloseOthers(sid);
+  soloUI();
+  try { dlog('专注模式：只保留 ' + sid); } catch (e) {}
+  toast('专注：只保留当前会话，其它连接已断开');
+}
+
 /* ---- 专注模式：只留后台听书，其余连接全断 ---- */
 const FOCUS = { on: false };
 function focusUI(){
@@ -24026,6 +24074,7 @@ function connTick(){
     if (state.pumping || state.activeJob) return;
     (state.sessions || []).forEach(function (s) {
       if (!s || s.kind !== 'direct' || !s.peerId) return;
+      if (SOLO.on && s.sid !== SOLO.sid) return;   // 专注中：不碰其它会话
       var now = Date.now();
       // 看门狗：lanDial 没有应答时不能永久把 _lanDialing 卡在 true
       if (s._lanDialing && s._lanStartedAt && now - s._lanStartedAt > 45000) {
