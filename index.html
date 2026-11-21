@@ -4797,6 +4797,12 @@ function bindChannel(link, dc, session){
     link._hb = setInterval(function () {
       if (!link.dc || link.dc.readyState !== 'open') return;
       const now = Date.now();
+      // 中枢兜底：好友在线状态是新鲜的、且显示对方在线 → 判活交给中枢，一个 ping 都不发
+      try {
+        const f = (state.friends || []).find(x => x && x.id === session.peerId);
+        const hubFresh = PRESENCE_OK_AT && (now - PRESENCE_OK_AT < 90000);
+        if (f && f.online && hubFresh) { link._hubOk = now; return; }
+      } catch (e) {}
       const rx = Math.max(link._lastRx || 0, link._lastPong || 0);
       // 断线判定：前台 35 秒 / 后台 200 秒没有收到对方任何消息
       if (now - rx > (document.hidden ? 200000 : 35000)) {
@@ -10702,7 +10708,7 @@ async function pubConnect(){
 }
 
 /* ==================== 事件绑定 ==================== */
-const BUILD_STAMP = '2026-11-21 17:20';
+const BUILD_STAMP = '2026-11-21 17:35';
 
 // 自检更新：服务器上的 index.html 版本号和当前页面不一致时，用带时间戳的地址强制重载一次
 (function selfUpdateCheck(){
@@ -24773,12 +24779,14 @@ function autoReconnectFriend(f){
   lanDial(sess);
 }
 
+let PRESENCE_OK_AT = 0;   // 上次成功从中枢拿到在线状态的时间（新鲜就由中枢兜底判活）
 async function lanPresence(){
   const ids = (state.friends || []).map(f => f.id).filter(Boolean);
   if (!ids.length) return;
   try {
     const j = await fetchT(lanBase() + '/__lan/presence?ids=' + encodeURIComponent(ids.join(',')) + '&ts=' + Date.now(),
       { cache: 'no-store' }, 6000).then(r => r.json());
+    PRESENCE_OK_AT = Date.now();      // 中枢在线状态是新鲜的：链路判活可以交给它
     let changed = false;
     (state.friends || []).forEach(f => {
       const on = !!(j.online && j.online[f.id]);
