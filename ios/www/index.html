@@ -1525,6 +1525,9 @@ body{color:var(--ink,#000)}
         <div class="panel-title">构建中枢</div>
         <div id="hub-status">正在检查…</div>
         <p class="hint" style="margin:6px 0 0;white-space:normal">开关公网入口挪到了「连接 → 公网」页，那里有开关键和当前通道状态。</p>
+        <label class="lbl" style="display:flex;gap:6px;align-items:center;margin-top:8px">
+          <input type="checkbox" id="hub-autolink"> 同一局域网自动串联（双方都开启才生效）
+        </label>
         <div class="row" style="align-items:center;gap:6px;margin-top:8px"><span>上传限速</span><input id="hub-upkbps" type="number" min="0" step="64" placeholder="0" style="width:90px"><span class="hint" style="margin:0">KB/s（0 或空 = 不限速）</span></div>
       </div>
     </section>
@@ -4183,6 +4186,25 @@ async function renderHubView(){
     return;
   }
   const cfg = st.cfg || {};
+  // 局域网自动串联开关（只有能管理的中枢才显示/可改）
+  try {
+    const al = document.getElementById('hub-autolink');
+    if (al) {
+      al.checked = !!cfg.autoLink;
+      al.disabled = !can;
+      if (!al._b) {
+        al._b = 1;
+        al.onchange = async function () {
+          try {
+            const r = await hubPost(base + '/__hub/config', { autoLink: !!al.checked });
+            if (r && r.ok) toast(al.checked ? '已开启：同网中枢自动串联' : '已关闭自动串联');
+            else toast('设置失败：' + ((r && r.error) || '无权限'));
+          } catch (e) { toast('设置失败：' + e.message); }
+          try { renderHubView(); } catch (e) {}
+        };
+      }
+    }
+  } catch (e) {}
   // 权限只认快照（hubSnapshot 里已经算过 st.admin / st.loopback），这里不再自己判断一遍
   const can = !!(snap.canManage || st.admin || st.loopback);
   const adminEnabled = !!st.adminEnabled;
@@ -10668,7 +10690,7 @@ async function pubConnect(){
 }
 
 /* ==================== 事件绑定 ==================== */
-const BUILD_STAMP = '2026-11-21 17:50';
+const BUILD_STAMP = '2026-11-21 16:20';
 
 // 自检更新：服务器上的 index.html 版本号和当前页面不一致时，用带时间戳的地址强制重载一次
 (function selfUpdateCheck(){

@@ -107,3 +107,25 @@ libtorrent4j（BSD-3-Clause）、OpenSSL、Boost、libdatachannel、jsnes（MIT�
 ---
 
 互联网精神与世长存。
+### 固定域名（推荐，地址不会再变）
+
+免费快速隧道（*.trycloudflare.com）每次启动都会换域名；用自己的域名配**命名隧道**就固定了：
+
+1. 域名托管到 Cloudflare → Zero Trust → Networks → Tunnels → **Create a tunnel**
+2. 建好后复制它的 **token**；在隧道里加一条 Public Hostname：hub.你的域名 → http://127.0.0.1:8642
+3. 启动中枢时带上环境变量：
+
+`at
+set HLJJS_TUNNEL_TOKEN=eyJhIjoi...（第 2 步复制的 token）
+set HLJJS_PUBLIC_URL=https://hub.你的域名
+python serve.py 8642
+`
+
+也可以用本机已登录的命名隧道名字：set HLJJS_TUNNEL_NAME=myhub。
+两个都没配就退回免费快速隧道（地址每次启动都变）。
+
+### 局域网自动串联
+
+中枢页有「同一局域网自动串联（双方都开启才生效）」开关：勾上后，同一个 Wi-Fi 下的中枢会互相广播身份
+（HLJJS1|地址|名字|中枢id|公钥指纹，UDP 38421），双方都开了就自动建链、自动验签；地址变了也能按中枢 id 找回。
+默认关闭 —— 谁也不想自己的中枢被同一网络的陌生人自动挂进目录。

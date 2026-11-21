@@ -996,7 +996,7 @@ HUB_BANS_FILE = os.path.join(HUB_DATA_DIR, 'bans.json')
 HUB_LOCK = threading.Lock()
 HUB_CONN_LOCK = threading.Lock()
 HUB_STATE = {'open': True, 'door': True}
-HUB_CFG = {'id': '', 'name': '', 'maxRooms': 0, 'maxMembers': 0, 'maxPerRoom': 30, 'rate_limit': True, 'turn': []}
+HUB_CFG = {'id': '', 'name': '', 'maxRooms': 0, 'maxMembers': 0, 'maxPerRoom': 30, 'rate_limit': True, 'turn': [], 'autoLink': False}
 HUB_PUBLIC_URL = os.environ.get('HLJJS_PUBLIC_URL', '').strip().rstrip('/')
 HUB_ADMIN_TOKEN = os.environ.get('HLJJS_ADMIN_TOKEN', '').strip()
 TUNNEL_MODE = (os.environ.get('HLJJS_TUNNEL') or '').strip().lower() in ('1', 'true', 'yes', 'on')
@@ -1547,6 +1547,130 @@ def hub_link_info():
             'door': hub_door_open(), 'members': members, 'online': online,
             'pub': HUB_KEY.get('pub'), 'fp': HUB_KEY.get('fp'),
             'keyReady': bool(HUB_KEY.get('ready'))}
+
+
+def _is_lan_ip(ip):
+    """内网/本机地址判断（含 IPv6 映射、ULA、链路本地）"""
+    ip = str(ip or '').strip().replace('::ffff:', '')
+    if not ip:
+        return False
+    if ip in ('::1', 'localhost'):
+        return True
+    low = ip.lower()
+    if low.startswith('fc') or low.startswith('fd') or low.startswith('fe80'):
+        return True
+    try:
+        parts = [int(x) for x in ip.split('.')]
+    except Exception:
+        return False
+    if len(parts) != 4:
+        return False
+    a, b = parts[0], parts[1]
+    return (a == 127 or a == 10 or (a == 192 and b == 168) or (a == 172 and 16 <= b <= 31)
+            or (a == 169 and b == 254))
+
+
+def hub_link_do_approve(rid, accept):
+    """审批串联（供界面和「局域网自动串联」共用）"""
+    rid = str(rid or '')[:32]
+    with HUB_PEER_LOCK:
+        req = HUB_LINK_REQS.get(rid)
+        if not req or req.get('status') != 'pending':
+            return {'ok': False, 'error': '申请不存在或已处理'}
+        req['status'] = 'approved' if accept else 'rejected'
+        req['key'] = hashlib.sha1(os.urandom(16)).hexdigest()[:16] if accept else ''
+        req = dict(req)
+    if not accept:
+        try:
+            hub_http_json(req['fromUrl'] + '/__hub/link/reject', {'reqId': rid})
+        except Exception:
+            pass
+        return {'ok': True, 'accepted': False}
+    key = req['key']
+    hub_peer_add(req['fromId'], req['fromUrl'], req['fromName'], key,
+                 req.get('fromPub'), req.get('fp'), req.get('verified'))
+    own = hub_link_info()
+    ts = int(time.time())
+    nonce = hashlib.sha1(os.urandom(12)).hexdigest()[:24]
+    peer_obj = {'id': own['id'], 'url': own['url'], 'name': own['name'],
+                'pub': own.get('pub'), 'fp': own.get('fp')}
+    sig = ''
+    if own.get('pub'):
+        sig = hub_sign('link-ok|' + rid + '|' + str(peer_obj['id']) + '|' +
+                       str(peer_obj['url']) + '|' + key + '|' + str(ts) + '|' + nonce)
+    cb = False
+    try:
+        r = hub_http_json(req['fromUrl'] + '/__hub/link/accept',
+                          {'reqId': rid, 'key': key, 'peer': peer_obj,
+                           'ts': ts, 'nonce': nonce, 'sig': sig})
+        cb = bool(r.get('ok'))
+    except Exception:
+        pass
+    return {'ok': True, 'accepted': True, 'callback': cb}
+
+
+def hub_link_send_request(url, name=''):
+    """本中枢向对方中枢发起串联申请（带签名）。"""
+    url = str(url or '').strip().rstrip('/')[:300]
+    if not (url.startswith('http://') or url.startswith('https://')):
+        return {'ok': False, 'error': '地址要 http:// 或 https://'}
+    own = hub_link_info()
+    rid = hashlib.sha1(os.urandom(16)).hexdigest()[:16]
+    ts = int(time.time())
+    nonce = hashlib.sha1(os.urandom(12)).hexdigest()[:24]
+    payload = {'reqId': rid, 'fromId': own['id'], 'fromUrl': own['url'],
+               'fromName': own['name'], 'ts': ts, 'nonce': nonce}
+    if own.get('pub'):
+        payload.update({'fromPub': own['pub'], 'fromFp': own.get('fp'),
+                        'sig': hub_sign('link-req|' + rid + '|' + str(own['id']) + '|' +
+                                        str(own['url']) + '|' + str(ts) + '|' + nonce)})
+    try:
+        r = hub_http_json(url + '/__hub/link/request', payload)
+    except Exception as e:
+        return {'ok': False, 'error': '连不上对方中枢：' + str(e)[:80], 'net': True}
+    if not r.get('ok'):
+        return {'ok': False, 'error': r.get('error') or '对方拒绝了申请'}
+    with HUB_PEER_LOCK:
+        HUB_LINK_OUT[rid] = {'reqId': rid, 'url': url, 'name': str(name or url)[:24],
+                             'at': time.time(), 'status': 'pending'}
+    return {'ok': True, 'reqId': rid}
+
+
+def hub_autolink_loop():
+    """局域网自动串联：同网中枢双方都开了 autoLink，就自动建链（默认关）。"""
+    time.sleep(12)
+    while True:
+        try:
+            if hub_cfg().get('autoLink'):
+                own_id = str(hub_cfg().get('id') or '')
+                with HUB_PEER_LOCK:
+                    known = set(HUB_PEERS.keys())
+                    pending = set(str(v.get('url') or '').rstrip('/') for v in HUB_LINK_OUT.values())
+                with SIGNAL_LOCK:
+                    cand = [dict(v) for v in LAN_HUBS.values()]
+                now5 = time.time()
+                for h in cand:
+                    pid = str(h.get('id') or '')
+                    url = str(h.get('url') or '').rstrip('/')
+                    if not pid or not url or pid == own_id or pid in known or url in pending:
+                        continue
+                    if now5 - float(h.get('at') or 0) > 60:
+                        continue
+                    try:
+                        info = hub_http_json(url + '/__info', timeout=3)
+                    except Exception:
+                        continue
+                    if not (info.get('cfg') or {}).get('autoLink'):
+                        continue
+                    r = hub_link_send_request(url, h.get('name') or '')
+                    try:
+                        print('[hub] 自动串联 %s -> %s : %s' % (h.get('name') or pid, url,
+                              'ok' if r.get('ok') else str(r.get('error'))))
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        time.sleep(20)
 
 
 def hub_http_json(url, payload=None, timeout=5):
@@ -2651,6 +2775,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         cfg['maxRooms'] = _int('maxRooms', 0, 5000, cfg.get('maxRooms', 0))
         cfg['maxMembers'] = _int('maxMembers', 0, 100000, cfg.get('maxMembers', 0))
         cfg['maxPerRoom'] = _int('maxPerRoom', 2, 30, cfg.get('maxPerRoom', 30))
+        if body.get('autoLink') is not None:
+            cfg['autoLink'] = bool(body.get('autoLink'))
         hub_cfg_save(cfg)
         return self._json({'ok': True, 'cfg': cfg})
 
@@ -2764,6 +2890,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if len(HUB_LINK_REQS) > 300:
                 for k in list(HUB_LINK_REQS.keys())[:100]:
                     HUB_LINK_REQS.pop(k, None)
+        # 局域网自动串联：本中枢开了 autoLink，且申请来自内网地址 → 直接同意
+        try:
+            _al = bool(hub_cfg().get('autoLink'))
+            _ip = (self.client_address[0] if self.client_address else '').replace('::ffff:', '')
+            if _al and _is_lan_ip(_ip):
+                _r = hub_link_do_approve(rid, True)
+                print('[hub] 自动串联同意 %s (%s) -> %s' % (rid, _ip, _r))
+        except Exception as _e:
+            print('[hub] 自动串联失败 %s: %s' % (rid, _e))
         return self._json({'ok': True})
 
     def _hub_link_pending(self):
@@ -2780,39 +2915,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         body = self._body() or {}
         rid = str(body.get('reqId') or '')[:32]
         accept = bool(body.get('accept'))
-        with HUB_PEER_LOCK:
-            req = HUB_LINK_REQS.get(rid)
-            if not req or req.get('status') != 'pending':
-                return self._json({'ok': False, 'error': '申请不存在或已处理'}, 404)
-            req['status'] = 'approved' if accept else 'rejected'
-            req['key'] = hashlib.sha1(os.urandom(16)).hexdigest()[:16] if accept else ''
-        if not accept:
-            try:
-                hub_http_json(req['fromUrl'] + '/__hub/link/reject', {'reqId': rid})
-            except Exception:
-                pass
-            return self._json({'ok': True, 'accepted': False})
-        key = req['key']
-        hub_peer_add(req['fromId'], req['fromUrl'], req['fromName'], key,
-                     req.get('fromPub'), req.get('fp'), req.get('verified'))
-        own = hub_link_info()
-        ts = int(time.time())
-        nonce = hashlib.sha1(os.urandom(12)).hexdigest()[:24]
-        peer_obj = {'id': own['id'], 'url': own['url'], 'name': own['name'],
-                    'pub': own.get('pub'), 'fp': own.get('fp')}
-        sig = ''
-        if own.get('pub'):
-            sig = hub_sign('link-ok|' + rid + '|' + str(peer_obj['id']) + '|' +
-                           str(peer_obj['url']) + '|' + key + '|' + str(ts) + '|' + nonce)
-        cb = False
-        try:
-            r = hub_http_json(req['fromUrl'] + '/__hub/link/accept',
-                              {'reqId': rid, 'key': key, 'peer': peer_obj,
-                               'ts': ts, 'nonce': nonce, 'sig': sig})
-            cb = bool(r.get('ok'))
-        except Exception:
-            pass
-        return self._json({'ok': True, 'accepted': True, 'callback': cb})
+        return self._json(hub_link_do_approve(rid, accept))
 
     def _hub_link_accept(self):
         body = self._body() or {}
@@ -4647,7 +4750,14 @@ def public_tunnel_stop():
 
 
 def public_tunnel_start():
-    """起 cloudflared 快速隧道，返回 (ok, url)"""
+    """起 cloudflared 隧道，返回 (ok, url)
+
+    固定域名模式（地址永远不变，推荐）：
+      set HLJJS_TUNNEL_TOKEN=...   # cloudflared 控制台里那条隧道的 token（优先）
+      set HLJJS_TUNNEL_NAME=myhub  # 或者用本机已登录的命名隧道名字
+      set HLJJS_PUBLIC_URL=https://hub.example.com   # 界面上显示/分享的固定地址
+    都没配就退回免费快速隧道（每次启动换地址）。
+    """
     global PUBLIC_PROC, PUBLIC_URL
     with PUBLIC_LOCK:
         if PUBLIC_PROC and PUBLIC_PROC.poll() is None and PUBLIC_URL:
@@ -4655,23 +4765,53 @@ def public_tunnel_start():
         exe = _cf_exe_path()
         if not exe:
             return False, '没找到 cloudflared.exe'
+        token = (os.environ.get('HLJJS_TUNNEL_TOKEN') or '').strip()
+        tname = (os.environ.get('HLJJS_TUNNEL_NAME') or '').strip()
+        fixed = (os.environ.get('HLJJS_PUBLIC_URL') or '').strip().rstrip('/')
+        named = bool(token or tname)
+        if token:
+            argv = [exe, 'tunnel', '--no-autoupdate', 'run', '--token', token]
+        elif tname:
+            argv = [exe, 'tunnel', '--no-autoupdate', 'run', tname]
+        else:
+            argv = [exe, 'tunnel', '--url', 'http://127.0.0.1:%d' % PORT, '--no-autoupdate']
         try:
-            p = subprocess.Popen([exe, 'tunnel', '--url', 'http://127.0.0.1:%d' % PORT, '--no-autoupdate'],
-                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+            p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
         except Exception as e:
             return False, str(e)
         url = ''
-        try:
-            for _ in range(80):
-                line = p.stdout.readline()
-                if not line:
-                    break
-                m = re.findall(r'https://[a-z0-9-]+\.trycloudflare\.com', line or '')
-                if m:
-                    url = m[0]
-                    break
-        except Exception:
-            pass
+        if named:
+            # 命名隧道地址是固定的：以 HLJJS_PUBLIC_URL 为准（没配就沿用上次记下的）
+            url = fixed
+            if not url:
+                try:
+                    url = (open(os.path.join(HUB_DATA_DIR, 'public-url.txt'), encoding='utf-8').read() or '').strip()
+                except Exception:
+                    url = ''
+            if not url:
+                try:
+                    for _ in range(20):
+                        line = p.stdout.readline()
+                        if not line:
+                            break
+                        m = re.findall(r'https://[a-z0-9.-]+', line or '')
+                        if m:
+                            url = m[0]
+                            break
+                except Exception:
+                    pass
+        else:
+            try:
+                for _ in range(80):
+                    line = p.stdout.readline()
+                    if not line:
+                        break
+                    m = re.findall(r'https://[a-z0-9-]+\.trycloudflare\.com', line or '')
+                    if m:
+                        url = m[0]
+                        break
+            except Exception:
+                pass
         PUBLIC_PROC = p
         PUBLIC_URL = url
         def _drain():
@@ -4776,6 +4916,10 @@ if __name__ == "__main__":
         pass
     try:
         threading.Thread(target=hub_peer_heal_loop, daemon=True).start()
+    except Exception:
+        pass
+    try:
+        threading.Thread(target=hub_autolink_loop, daemon=True).start()
     except Exception:
         pass
     try:
