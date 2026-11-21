@@ -942,6 +942,7 @@ body{color:var(--ink,#000)}
           </div>
           <div class="row" style="gap:4px;margin-top:8px;flex-wrap:wrap">
             <button class="bevel small" id="pub-pc">电脑公网：开/关</button>
+            <button class="bevel small" id="pub-phonehub" style="display:none">手机一键部署公网</button>
           </div>
           <div class="hint" id="pub-msg" style="margin:4px 0 0">公网通道：未开启</div>
           <p class="hint" style="margin:2px 0 0;white-space:normal">把这里显示的地址发给好友，让 TA 填到上面「对方公网地址」里。</p>
@@ -1521,10 +1522,7 @@ body{color:var(--ink,#000)}
       <div class="panel">
         <div class="panel-title">构建中枢</div>
         <div id="hub-status">正在检查…</div>
-        <p class="hint" style="margin:6px 0 0;white-space:normal">开关公网入口挪到了「连接 → 公网」页，那里有「电脑公网：开/关」和当前通道状态。</p>
-        <div class="row" style="margin-top:6px;gap:4px;flex-wrap:wrap">
-          <button class="bevel small" id="pub-phonehub" style="display:none">手机一键部署公网</button>
-        </div>
+        <p class="hint" style="margin:6px 0 0;white-space:normal">开关公网入口挪到了「连接 → 公网」页，那里有开关键和当前通道状态。</p>
         <div class="row" style="align-items:center;gap:6px;margin-top:8px"><span>上传限速</span><input id="hub-upkbps" type="number" min="0" step="64" placeholder="0" style="width:90px"><span class="hint" style="margin:0">KB/s（0 或空 = 不限速）</span></div>
       </div>
     </section>
@@ -10653,7 +10651,7 @@ async function pubConnect(){
 }
 
 /* ==================== 事件绑定 ==================== */
-const BUILD_STAMP = '2026-11-21 15:25';
+const BUILD_STAMP = '2026-11-21 15:40';
 
 // 自检更新：服务器上的 index.html 版本号和当前页面不一致时，用带时间戳的地址强制重载一次
 (function selfUpdateCheck(){
@@ -28396,7 +28394,22 @@ html[data-skin="yolk"] .titlebar .tbtn{color:#3a2400}
         if (!AndroidApp.phoneHubStart) return;
         say('启动时自动开公网…');
         var pr = AndroidApp.phoneHubStart();
-        if (pr !== 'started' && String(pr).indexOf('already:') !== 0) say('自动开公网失败：' + pr);
+        if (pr !== 'started' && String(pr).indexOf('already:') !== 0) { say('自动开公网失败：' + pr); return; }
+        var t0 = Date.now();
+        var tick = setInterval(function () {
+          try {
+            var st = phoneHubParse();
+            if (st && st.url) {
+              say(st.url);
+              var mi = document.getElementById('pub-mine');
+              if (mi) mi.value = st.url;
+              clearInterval(tick);
+              return;
+            }
+            if (st && st.state) say('部署中（' + st.state + '）' + (st.detail && st.detail !== 'ok' ? '：' + st.detail : ''));
+            if (Date.now() - t0 > 5 * 60000) { say('超时，可在「构建中枢」页重试'); clearInterval(tick); }
+          } catch (e) { clearInterval(tick); }
+        }, 2000);
         return;
       }
       say('启动时自动开公网…');
