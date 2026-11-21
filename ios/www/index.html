@@ -10663,7 +10663,7 @@ async function pubConnect(){
 }
 
 /* ==================== 事件绑定 ==================== */
-const BUILD_STAMP = '2026-11-21 16:55';
+const BUILD_STAMP = '2026-11-21 17:25';
 
 // 自检更新：服务器上的 index.html 版本号和当前页面不一致时，用带时间戳的地址强制重载一次
 (function selfUpdateCheck(){
@@ -14814,6 +14814,26 @@ function signalRemember(url){
   try { scheduleSave(); } catch (e) {}
 }
 /** 候选顺序：用户设的 > 历史能用的 > 平台兜底 */
+/* 局域网里的中枢（用来给「自愈」当候选）：向当前中枢要 /__lan/hubs */
+let LAN_HUBS_CACHE = [];
+async function lanHubsRefresh(){
+  const bases = [];
+  try { if (!window.AndroidApp) bases.push(location.origin); } catch (e) {}
+  try { const b = roomHubBase(); if (b) bases.push(b); } catch (e) {}
+  for (const b of bases) {
+    try {
+      const ac = new AbortController();
+      const t = setTimeout(function () { try { ac.abort(); } catch (e) {} }, 1500);
+      const r = await fetch(String(b).replace(/\/+$/, '') + '/__lan/hubs', { cache: 'no-store', signal: ac.signal });
+      clearTimeout(t);
+      const j = await r.json();
+      const list = (j && Array.isArray(j.hubs)) ? j.hubs : [];
+      LAN_HUBS_CACHE = list.map(h => h && h.url).filter(Boolean);
+      return LAN_HUBS_CACHE;
+    } catch (e) {}
+  }
+  return LAN_HUBS_CACHE;
+}
 function signalCandidates(){
   const out = [];
   const push = function (u) {
@@ -14823,13 +14843,18 @@ function signalCandidates(){
   };
   push(state.settings.signalBase);
   signalKnownList().forEach(push);
+  LAN_HUBS_CACHE.forEach(push);
+  // 本机中枢只作为「兜底」：已经配了别的中枢时，不要静默切回本机（否则看起来连上了、其实连的是自己）
+  const own = location.origin.replace(/\/+$/, '');
+  const curBase = String(state.settings.signalBase || '').replace(/\/+$/, '');
   if (window.AndroidApp) push('http://127.0.0.1:8650');   // adb reverse 到电脑 8642
-  else push(location.origin.replace(/\/+$/, ''));
+  else if (!curBase || curBase === own) push(own);
   return out;
 }
 async function signalAutoHeal(){
   if (typeof FOCUS !== 'undefined' && FOCUS.on) return;
   const cur = String(state.settings.signalBase || '').trim().replace(/\/+$/, '');
+  try { await lanHubsRefresh(); } catch (e) {}
   const cands = signalCandidates();
   if (!cands.length) return;
   const test = async function (b) {
@@ -15902,6 +15927,9 @@ function boot(){
   padBindDrag();
   hookMsgNotify();
   setTimeout(function () { loadPlugins().catch(function () {}); }, 1200);
+  // 局域网中枢列表：自愈的候选来源，定时刷新（手机/电脑谁换了地址都能捞回来）
+  setTimeout(function () { try { lanHubsRefresh(); } catch (e) {} }, 1500);
+  setInterval(function () { try { lanHubsRefresh(); } catch (e) {} }, 20000);
   // 启动时自动开公网（设置里可关；默认开）。等首屏稳定再开，别和界面抢资源
   setTimeout(function () {
     try {

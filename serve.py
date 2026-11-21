@@ -725,6 +725,47 @@ def global_ipv6():
 
 LAN_BEACON_PORT = 38421
 LAN_BEACON_NAME = ''
+LAN_HUBS = {}          # ip -> {'url':.., 'name':.., 'at': ts}  局域网里听到的中枢
+
+
+def lan_hub_listen_loop():
+    """听别的中枢（电脑/手机）广播，记下来；客户端地址失效时用 /__lan/hubs 自愈。"""
+    try:
+        import socket as _sock
+    except Exception:
+        return
+    so = None
+    while True:
+        try:
+            if so is None:
+                so = _sock.socket(_sock.AF_INET, _sock.SOCK_DGRAM)
+                so.setsockopt(_sock.SOL_SOCKET, _sock.SO_REUSEADDR, 1)
+                try:
+                    so.setsockopt(_sock.SOL_SOCKET, _sock.SO_BROADCAST, 1)
+                except Exception:
+                    pass
+                so.bind(('', LAN_BEACON_PORT))
+                so.settimeout(30)
+            data, addr = so.recvfrom(512)
+            msg = data.decode('utf-8', 'ignore')
+            parts = msg.split('|')
+            if len(parts) >= 2 and parts[0] == 'HLJJS1' and parts[1].startswith('http'):
+                ip = addr[0]
+                # 自己广播的也收得到，别把自己列进去
+                try:
+                    if parts[1].rstrip('/') == 'http://%s:%d' % (lan_ip(), PORT):
+                        continue
+                except Exception:
+                    pass
+                with SIGNAL_LOCK:
+                    LAN_HUBS[ip] = {'url': parts[1].rstrip('/'), 'name': (parts[2] if len(parts) > 2 else ''), 'at': time.time()}
+        except Exception:
+            try:
+                if so is not None:
+                    so.settimeout(30)
+            except Exception:
+                so = None
+            time.sleep(1)
 
 def lan_beacon_loop():
     """持续往局域网广播自己的地址，手机 App 收到后自动把这里设为服务节点。"""
@@ -3757,6 +3798,28 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 pass
             return
 
+        if path == '/__lan/hubs':
+            # 局域网里广播过的中枢（含手机中枢）。客户端地址失效时靠它自愈。
+            now3 = time.time()
+            out = []
+            with SIGNAL_LOCK:
+                for ip, v in list(LAN_HUBS.items()):
+                    if now3 - v.get('at', 0) > 120:
+                        LAN_HUBS.pop(ip, None)
+                        continue
+                    out.append({'url': v.get('url', ''), 'name': v.get('name', ''), 'ip': ip,
+                                'age': int(now3 - v.get('at', now3))})
+            body = json.dumps({'ok': True, 'hubs': out}, ensure_ascii=False).encode('utf-8')
+            try:
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json; charset=utf-8')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception:
+                pass
+            return
+
         if path == '/__lan/peers':
             q = self._query()
             me = q.get('id', '')
@@ -4653,6 +4716,10 @@ if __name__ == "__main__":
         pass
     try:
         threading.Thread(target=lan_beacon_loop, daemon=True).start()
+    except Exception:
+        pass
+    try:
+        threading.Thread(target=lan_hub_listen_loop, daemon=True).start()
     except Exception:
         pass
     try:
