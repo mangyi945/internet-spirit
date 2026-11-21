@@ -853,7 +853,7 @@ def _proxy_inject(html, base):
               'parent.postMessage({type:"hljjs-proxy",url:abs},"*");}catch(err){}},true);'
               'var __m={};function __r(u,k){try{if(!u||__m[u])return;if(!/^https?:/i.test(u))return;__m[u]=1;'
               'parent.postMessage({type:"hljjs-media",url:u,kind:k||""},"*");}catch(e){}}'
-              'function __is(u){return /\.(mp4|m4v|webm|mkv|mov|mp3|m4a|aac|ogg|wav|flac|m3u8|mpd|ts)(\?|$)/i.test(u||"");}'
+              'function __is(u){return /\\.(mp4|m4v|webm|mkv|mov|mp3|m4a|aac|ogg|wav|flac|m3u8|mpd|ts)(\\?|$)/i.test(u||"");}'
               'try{var __f=window.fetch;if(__f){window.fetch=function(){try{var a=arguments[0];var u=typeof a==="string"?a:(a&&a.url);if(__is(u))__r(u,"fetch");}catch(e){}return __f.apply(this,arguments);};}}catch(e){}'
               'try{var __o=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){try{if(__is(u))__r(u,"xhr");}catch(e){}return __o.apply(this,arguments);};}catch(e){}'
               'function __scan(){try{document.querySelectorAll("video,audio,source").forEach(function(el){var u=el.currentSrc||el.src||el.getAttribute("src");if(__is(u))__r(u,el.tagName.toLowerCase());});'

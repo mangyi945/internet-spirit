@@ -10579,6 +10579,16 @@ function switchMode(mode, sub){
 async function pubLoadMine(){
   const inp = document.getElementById('pub-mine');
   if (!inp) return '';
+  // 手机：直接读 phoneHubStatus（ready|url|port），比问本地 HTTP 稳
+  try {
+    if (window.AndroidApp && AndroidApp.phoneHubStatus) {
+      const parts = String(AndroidApp.phoneHubStatus() || '').split('|');
+      const u = /^https?:\/\//.test(parts[1] || '') ? parts[1] : '';
+      inp.value = u;
+      inp.placeholder = u ? '' : '未开启（点下面的「手机一键部署公网」）';
+      return u;
+    }
+  } catch (e) {}
   try {
     const base = roomHubBase();
     const r = await fetch(base + '/__hub/public/state', { cache: 'no-store' });
@@ -10648,7 +10658,7 @@ async function pubConnect(){
 }
 
 /* ==================== 事件绑定 ==================== */
-const BUILD_STAMP = '2026-11-21 15:55';
+const BUILD_STAMP = '2026-11-21 16:20';
 
 // 自检更新：服务器上的 index.html 版本号和当前页面不一致时，用带时间戳的地址强制重载一次
 (function selfUpdateCheck(){
@@ -28395,16 +28405,19 @@ html[data-skin="yolk"] .titlebar .tbtn{color:#3a2400}
         var t0 = Date.now();
         var tick = setInterval(function () {
           try {
-            var st = phoneHubParse();
-            if (st && st.url) {
-              say(st.url);
+            var parts = String(AndroidApp.phoneHubStatus ? (AndroidApp.phoneHubStatus() || '') : '').split('|');
+            var state = parts[0] || '';
+            // 即使状态行是 err:python（端口占用后会自动换端口重试），只要已经有地址就算成功
+            var url = /^https?:\/\//.test(parts[1] || '') ? parts[1] : '';
+            if (url) {
+              say(url);
               var mi = document.getElementById('pub-mine');
-              if (mi) mi.value = st.url;
+              if (mi) mi.value = url;
               clearInterval(tick);
               return;
             }
-            if (st && st.state) say('部署中（' + st.state + '）' + (st.detail && st.detail !== 'ok' ? '：' + st.detail : ''));
-            if (Date.now() - t0 > 5 * 60000) { say('超时，可在「构建中枢」页重试'); clearInterval(tick); }
+            if (state) say('部署中（' + state + '）');
+            if (Date.now() - t0 > 5 * 60000) { say('超时，可在上面再点一次「手机一键部署公网」'); clearInterval(tick); }
           } catch (e) { clearInterval(tick); }
         }, 2000);
         return;

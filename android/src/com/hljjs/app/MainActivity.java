@@ -895,6 +895,8 @@ ProcessBuilder pb = new ProcessBuilder(py, serve, String.valueOf(hubPort));
                     pb.environment().put("PYTHONPATH", stdlib.getAbsolutePath() + ":" + dir.getAbsolutePath());
                     pb.environment().put("SSL_CERT_FILE", new File(dir, "cacert.pem").getAbsolutePath());
                     pb.environment().put("HLJJS_TUNNEL", "1");
+                    pb.environment().put("PYTHONWARNINGS", "ignore");   // 别让 SyntaxWarning 混进 err 日志
+                    pb.environment().put("PYTHONUNBUFFERED", "1");
                     pb.redirectErrorStream(true);
                     Process p = pb.start();
                     phoneHubProc = p;
