@@ -34,8 +34,8 @@ Xcode 里：选 Team（签名）→ Bundle Identifier 改成自己的（如 `com
 
 ## 云构建（没有 Mac）
 
-仓库自带 GitHub Actions：`.github/workflows/ios.yml`，在 Actions 里手动 Run 或推 main 时触发，
-在 `macos-14` 上生成**未签名 IPA**（`hljjs-ios-ipa` artifact，保留 30 天），下载后自己签名安装。
+仓库自带 Actions 配置：`ios/github-actions-ios.yml`。把它复制到仓库根的 `.github/workflows/ios.yml`（需要仓库写权限），
+然后在 Actions 里手动 Run（或推 main 触发）：会在 `macos-14` 上生成**未签名 IPA**（`hljjs-ios-ipa` artifact，保留 30 天），下载后自己签名安装。
 
 ## 更新前端
 

@@ -23,7 +23,7 @@
 | `tools/cdp.mjs` | 真机页面调试（Chrome DevTools Protocol）小工具 | 被其他脚本 import |
 | `tools/syntax_check.mjs` | 检查 `index.html` 里的 JS 语法 | `node tools/syntax_check.mjs` |
 | `ios/` | iOS 壳（Capacitor + WKWebView） | `cd ios && npm install && npx cap add ios` |
-| `.github/workflows/ios.yml` | 在 GitHub Actions（macos-14）上打未签名 IPA | Actions 里手动 Run |
+| `ios/github-actions-ios.yml` | GitHub Actions（macos-14）打未签名 IPA | 复制到 `.github/workflows/` 后手动 Run |
 | `SECURITY.md` | 威胁模型、部署建议、漏洞披露 | — |
 
 ## 运行
@@ -56,8 +56,8 @@ npx cap sync ios
 npx cap open ios     # 有 Mac 时用 Xcode 签名出 IPA
 ```
 
-没有 Mac：仓库自带 `.github/workflows/ios.yml`，在 Actions 里跑一次会在 `macos-14` 上
-产出**未签名 IPA**（artifact `hljjs-ios-ipa`），下载后自己签名安装。
+没有 Mac：把 `ios/github-actions-ios.yml` 复制到仓库根的 `.github/workflows/ios.yml`（需要仓库写权限），
+在 Actions 里手动 Run 一次，会在 `macos-14` 上产出**未签名 IPA**（artifact `hljjs-ios-ipa`），下载后自己签名安装。
 
 **iOS 的限制（系统原因）**：不能在本机起中枢（跑不了 Python / cloudflared），
 所以 **iOS 只能连别人已经开好的中枢，不能自己开公网当中枢**。App 里会自动隐藏相关按钮。
