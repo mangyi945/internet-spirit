@@ -1445,26 +1445,25 @@ body{color:var(--ink,#000)}
     <!-- 关于 -->
     <section class="view" id="v-about" hidden>
       <div class="panel">
-        <div class="panel-title">互联网精神与世长存 0.6.18</div>
-        <p class="hint" id="about-build" style="margin-top:-4px">构建于互联网精神之上</p>
-        <p class="hint">这是一个没有服务器的点对点传输工具。</p>
-        <p class="hint">双方交换一次暗号后，文字与文件直接在两台设备之间流动。</p>
+        <div class="panel-title">互联网精神与世长存</div>
+        <p class="hint" id="about-build" style="margin-top:-4px">本软件构建于互联网精神之上</p>
+        <p class="hint">是一个以自身为中枢部署公网的点对点聊天工具。</p>
+        <p class="hint" style="margin-top:8px">p2p直连的功能有短信蓝牙，但会受限于网络环境并且连接无法自愈所以推荐开启公网中枢。</p>
+        <p class="hint" style="margin-top:8px">至于网络防护，具体的运作流程不方便透露，但是锁君子不锁小人，所以就提前告诉你们吧这玩意你就算把门撬开了，里面也啥都没有，只能读取并且限流还会被强制踢出，所以小坏蛋们还是别想着一天到晚光欺负人了。</p>
+        <p class="hint" style="margin-top:8px">在同一网络下双方可以直接检索到对方加上好友，彼此的身份信息保存在中枢上。再次登录只要公网通道保持开放双方同时在线即可重连。</p>
         <p class="hint">因为没有服务器所以不保存消息，不记录联系人，不要求注册。</p>
         <p class="hint">没有人会管你传的是什么少儿不宜的东西。</p>
         <p class="hint">就像你可以将自己的双脚屹立在大地上，没有盖世太保会限制人们用脚的自由。</p>
-        <p class="hint">（朱元璋除外，他以后的皇帝也都除外。）</p>
-        <p class="hint">但这不代表你可以直接一脚把人踹死，都是出来混的希望你会对自己负责。</p>
-        <p class="hint">至于社团功能类似于一个私服。</p>
-        <p class="hint">想要创建社团需要本地部署或者云部署服务器。</p>
-        <p class="hint">可以用nas，或者vps云服务器，或者电脑直接公网部署。</p>
-        <p class="hint">部署公网相关的网络防护已经备好，不懂怎么用的就问百度。。。。</p>
-        <p class="hint">不对时代变了，去问豆包吧。</p>
-        <p class="hint">她会以最直白最不饶弯子的方式告诉你是个傻子。</p>
+        <p class="hint">（朱元璋除外，他以后的皇帝也都除外。〉</p>
+        <p class="hint">但这不代表你可以直接一脚把人踹死，都是出来混的帮望你会对自己负责。</p>
+        <p class="hint" style="margin-top:8px">至于社团以创建者的公网中枢为通路，如果团长不在线的话就社团也就掉线了。</p>
         <p class="hint">部署后会形成中枢，在同一中枢下的社员等可以直接互加好友。</p>
         <p class="hint">但私聊中枢只负责帮双方搭桥，减少带宽消耗，同时内容不会被上传。</p>
+        <p class="hint" style="margin-top:8px">附带磁链功能听书以及mp3视频播放以及游戏机。</p>
         <p class="hint">该软件不所属这个世界上的任何人，大家可以随意传播编辑。</p>
-        <p class="hint" style="margin-bottom:0">互联网精神与世长存 。</p>
-        <p class="hint" style="margin:4px 0 0;font-size:10px;color:#666">构建一个人活着的世界，永远靠的是正确的共识。</p>
+        <p class="hint" style="margin-top:8px">该软件不所属这个世界上的任何人，可以随意传播编辑。</p>
+        <p class="hint" style="margin-top:8px">互联网精神与世长存 。</p>
+        <p class="hint" style="margin:8px 0 0">四海皆兄弟，朋友们有缘再见。</p>
       </div>
       <div class="panel">
         <div class="panel-title">感谢技术开源</div>
@@ -1474,6 +1473,12 @@ body{color:var(--ink,#000)}
           <li><b>WebRTC</b> — 点对点数据通道</li>
           <li><b>Zpix（最像素）</b> — 像素字体（MIT · SolidZORO）</li>
           <li><b>jsnes</b> — NES 模拟器核心（MIT）</li>
+          <li><b>libtorrent4j</b> — BitTorrent / DHT 引擎（BSD-3-Clause）</li>
+          <li><b>OpenSSL</b> — TLS（Apache-2.0）</li>
+          <li><b>Boost</b> — C++ 基础库（BSL-1.0）</li>
+          <li><b>libdatachannel</b> — WebRTC 实现（MPL-2.0）</li>
+          <li><b>PPSSPP</b> — PSP 模拟器（GPL-2.0+）</li>
+          <li><b>Capacitor</b> — iOS 壳（MIT）</li>
           <li><b>Python 3</b> — 中枢服务（PSF）</li>
           <li><b>edge-tts</b> — 在线语音合成</li>
           <li><b>GPT-SoVITS</b> — 本地语音克隆（MIT）</li>
@@ -10658,7 +10663,7 @@ async function pubConnect(){
 }
 
 /* ==================== 事件绑定 ==================== */
-const BUILD_STAMP = '2026-11-21 16:20';
+const BUILD_STAMP = '2026-11-21 16:55';
 
 // 自检更新：服务器上的 index.html 版本号和当前页面不一致时，用带时间戳的地址强制重载一次
 (function selfUpdateCheck(){
@@ -11000,7 +11005,7 @@ function bindUI(){
   });
 
   const bEl = document.getElementById('about-build');
-  if (bEl) bEl.textContent = '构建于互联网精神之上';
+  if (bEl) bEl.textContent = '本软件构建于互联网精神之上';
   try { console.log('互联网精神与世长存 build', BUILD_STAMP); } catch (e) {}
 
   // 记录页已经换成"社团"页，清空记录的按钮跟着去掉
