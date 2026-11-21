@@ -865,8 +865,31 @@ private void initTts() {
         }
     }
 
+    /* 清掉上次进程残留的 serve.py（App 重启/装新包后旧中枢进程还在跑，会白吃 CPU 和内存） */
+    private void killStalePhoneHubs() {
+        try {
+            String[] dirs = new java.io.File("/proc").list();
+            if (dirs == null) return;
+            for (String d : dirs) {
+                if (d == null || d.isEmpty() || !Character.isDigit(d.charAt(0))) continue;
+                int pid;
+                try { pid = Integer.parseInt(d); } catch (Throwable e) { continue; }
+                if (pid == android.os.Process.myPid()) continue;
+                try {
+                    byte[] buf = java.nio.file.Files.readAllBytes(
+                            new java.io.File("/proc/" + d + "/cmdline").toPath());
+                    String cmd = new String(buf).replace('\0', ' ').trim();
+                    if (cmd.contains("phonedep/serve.py")) {
+                        android.os.Process.killProcess(pid);
+                    }
+                } catch (Throwable ignored) { }
+            }
+        } catch (Throwable ignored) { }
+    }
+
     private String phoneHubStartImpl() {
         if ("running".equals(phoneHubState) || "tunnel".equals(phoneHubState)) return "already:" + phoneHubUrl;
+        killStalePhoneHubs();
         phoneHubState = "running";
         new Thread(new Runnable() {
             public void run() {

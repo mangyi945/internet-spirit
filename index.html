@@ -4796,7 +4796,12 @@ function bindChannel(link, dc, session){
     clearInterval(link._hb);
     link._hb = setInterval(function () {
       if (!link.dc || link.dc.readyState !== 'open') return;
-      if (Date.now() - (link._lastPong || 0) > 35000) {
+      // 后台/息屏降频：心跳只用来判活，没必要每 25 秒打扰一次（省电）
+      const _hbGap = document.hidden ? 90000 : 25000;
+      const _nowHb = Date.now();
+      if (link._hbAt && _nowHb - link._hbAt < _hbGap - 1000) return;
+      link._hbAt = _nowHb;
+      if (_nowHb - (link._lastPong || 0) > (document.hidden ? 200000 : 35000)) {
         try { dlog('P2P 心跳超时，关闭链路'); } catch (e) {}
         try { link.dc.close(); } catch (e) {}
         return;
@@ -8787,7 +8792,7 @@ function hubPresencePing(offline){
 function hubPresenceStart(){
   clearInterval(HUB_PRESENCE_TIMER);
   hubPresencePing();
-  HUB_PRESENCE_TIMER = setInterval(function () { hubPresencePing(); }, 30000);
+  HUB_PRESENCE_TIMER = setInterval(function () { if (document.hidden && Date.now() - (window.__ppAt || 0) < 90000) return; window.__ppAt = Date.now(); hubPresencePing(); }, 30000);
 }
 window.addEventListener('beforeunload', function () { hubPresencePing(true); });
 
@@ -9247,7 +9252,7 @@ async function closedRoomRegister(s, code){
   s.openInfo = { base: base, code: j.code || code, token: j.token, private: true };
   s._closedCode = s.openInfo.code;
   clearInterval(s._openT);
-  s._openT = setInterval(function () { openRoomPoll(s); }, 4000);
+  s._openT = setInterval(function () { if (document.hidden && Date.now() - (s._openAt || 0) < 30000) return; s._openAt = Date.now(); openRoomPoll(s); }, 4000);
   return s.openInfo;
 }
 async function closedRoomRefresh(s){
@@ -10693,7 +10698,7 @@ async function pubConnect(){
 }
 
 /* ==================== 事件绑定 ==================== */
-const BUILD_STAMP = '2026-11-21 16:50';
+const BUILD_STAMP = '2026-11-21 17:05';
 
 // 自检更新：服务器上的 index.html 版本号和当前页面不一致时，用带时间戳的地址强制重载一次
 (function selfUpdateCheck(){
@@ -19621,7 +19626,7 @@ function shelfNavStart(){
   clearInterval(SHELF.navTimer);
   SHELF.navTimer = setInterval(shelfNavUpdate, 15000);
   clearInterval(SHELF.navClock);
-  SHELF.navClock = setInterval(shelfNavClock, 5000);
+  SHELF.navClock = setInterval(function () { if (document.hidden) return; shelfNavClock(); }, 5000);
   shelfNavClock();
 }
 
@@ -21763,7 +21768,7 @@ function nvStatusStart(){
   clearInterval(NOV.statusTimer);
   NOV.statusTimer = setInterval(() => { nvStatusInfo(); }, 20000);
   clearInterval(NOV.clockTimer);
-  NOV.clockTimer = setInterval(nvStatusClock, 5000);
+  NOV.clockTimer = setInterval(function () { if (document.hidden) return; nvStatusClock(); }, 5000);
   nvStatusClock();
 }
 
