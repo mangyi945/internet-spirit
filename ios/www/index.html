@@ -917,7 +917,6 @@ body{color:var(--ink,#000)}
 
         <div class="seg" id="mode-seg">
           <button class="seg-btn active" data-mode="manual">手动暗号</button>
-          <button class="seg-btn" data-mode="pair">配对码</button>
           <button class="seg-btn" data-mode="public">公网</button>
           <button class="seg-btn" data-mode="sms">短信搭桥</button>
           <button class="seg-btn" data-mode="bt">蓝牙</button>
@@ -925,19 +924,7 @@ body{color:var(--ink,#000)}
         </div>
 
 
-        <div id="pane-pair" hidden>
-          <p class="hint" style="margin:0 0 6px">两个人都在线时用：发起方点「生成配对码」，把 <b>6 位数字</b>念给对方；对方输入后自动直连（约 3 分钟内有效）。需要一个会合点（电脑中枢或对方中枢）。</p>
-          <button class="bevel wide" id="pair-new">生成配对码</button>
-          <div class="bigcode" id="pair-code" style="margin:6px 0">------</div>
-          <p class="hint" style="text-align:center;margin:2px 0 6px" id="pair-hint" hidden>把这个 6 位数字告诉对方</p>
-          <label class="lbl">输入对方的配对码</label>
-          <div class="row" style="gap:6px">
-            <input id="pair-code-in" type="text" maxlength="6" inputmode="numeric" placeholder="000000"
-                   style="flex:1;font-family:Consolas,monospace;font-size:20px;text-align:center;letter-spacing:6px;padding:6px">
-            <button class="bevel" id="pair-join" style="padding:8px 14px">加入</button>
-          </div>
-          <p class="hint" id="pair-state" style="margin:4px 0 0"></p>
-        </div>
+
 
         <div id="pane-public" hidden>
           <p class="hint" style="margin:0 0 6px">填对方的公网地址：cloudflared 域名（<code>https://xxx.trycloudflare.com</code>）或 IP:端口（<code>1.2.3.4:8642</code>，自动补 http://）。连上后用它当会合点，再用暗号/名片建立 1:1。</p>
@@ -10562,7 +10549,6 @@ function switchMode(mode, sub){
   $$('#mode-seg .seg-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === m));
   $$('#manual-seg .seg-btn').forEach(b => b.classList.toggle('active', b.dataset.sub === sb));
 
-  $('#pane-pair').hidden = m !== 'pair';
   $('#pane-public').hidden = m !== 'public';
   if (m === 'public') { try { pubLoadMine(); } catch (e) {} }
   $('#pane-sms').hidden = m !== 'sms';
@@ -10585,64 +10571,6 @@ function switchMode(mode, sub){
   btn.textContent = m === 'room' ? '② 生成加入码' : '② 生成应答码';
   btn.onclick = () => (m === 'room' ? joinRoomByInvite() : guestAnswer())
     .catch(e => toast('失败：' + e.message));
-}
-
-/* ==================== 6 位在线配对码 ==================== */
-async function pairHostCode(){
-  const st = document.getElementById('pair-state');
-  const codeEl = document.getElementById('pair-code');
-  const hint = document.getElementById('pair-hint');
-  try {
-    if (st) st.textContent = '正在生成…';
-    const s = newSession('direct', { role: 'host', title: '等待配对…' });
-    state.activeSid = s.sid;
-    const link = makeLink(s);
-    s.links.push(link);
-    const dc = link.pc.createDataChannel('hl', { ordered: true });
-    bindChannel(link, dc, s);
-    await link.pc.setLocalDescription(await link.pc.createOffer());
-    await waitIce(link.pc);
-    const code = await sigNew();
-    await sigPut(code, 'offer', link.pc.localDescription.sdp);
-    if (codeEl) codeEl.textContent = code;
-    if (hint) hint.hidden = false;
-    if (st) st.textContent = '等待对方输入…';
-    try {
-      const ans = await sigGet(code, 'answer', 180);
-      await link.pc.setRemoteDescription({ type: 'answer', sdp: ans });
-      if (st) st.textContent = '对方已加入，正在建立直连…';
-      setStatus('已配对，正在直连…', 'wait');
-    } catch (e) {
-      if (st) st.textContent = e.message === 'TIMEOUT' ? '等待超时，重新生成' : ('失败：' + e.message);
-    }
-  } catch (e) {
-    if (!signalHelp(e)) toast('生成配对码失败：' + (e.message || e));
-    if (st) st.textContent = '生成失败：' + (e.message || e);
-  }
-}
-async function pairJoinCode(){
-  const inp = document.getElementById('pair-code-in');
-  const st = document.getElementById('pair-state');
-  const code = String((inp && inp.value) || '').replace(/\D/g, '');
-  if (code.length !== 6) return toast('请输入 6 位数字配对码');
-  try {
-    if (st) st.textContent = '正在找对方…';
-    const offer = await sigGet(code, 'offer', 25);
-    const s = newSession('direct', { role: 'guest', title: '配对 ' + code });
-    state.activeSid = s.sid;
-    const link = makeLink(s);
-    s.links.push(link);
-    link.pc.ondatachannel = e => bindChannel(link, e.channel, s);
-    await link.pc.setRemoteDescription({ type: 'offer', sdp: offer });
-    await link.pc.setLocalDescription(await link.pc.createAnswer());
-    await waitIce(link.pc);
-    await sigPut(code, 'answer', link.pc.localDescription.sdp);
-    if (st) st.textContent = '已发送应答，正在建立直连…';
-    setStatus('已加入，等待对方完成连接…', 'wait');
-  } catch (e) {
-    if (signalHelp(e)) return;
-    if (st) st.textContent = e.message === 'TIMEOUT' ? '没找到这个配对码（确认对方已生成、且连同一台中枢）' : ('加入失败：' + e.message);
-  }
 }
 
 /* ==================== 公网直连 ==================== */
@@ -10718,7 +10646,7 @@ async function pubConnect(){
 }
 
 /* ==================== 事件绑定 ==================== */
-const BUILD_STAMP = '2026-11-21 14:12';
+const BUILD_STAMP = '2026-11-21 14:35';
 
 // 自检更新：服务器上的 index.html 版本号和当前页面不一致时，用带时间戳的地址强制重载一次
 (function selfUpdateCheck(){
@@ -10872,12 +10800,6 @@ function bindUI(){
   if (sNext) sNext.onclick = function () { chatSearchJump(1); };
   const sClose = $('#chat-search-close');
   if (sClose) sClose.onclick = function () { chatSearchToggle(); };
-  const pairNew = $('#pair-new');
-  if (pairNew) pairNew.onclick = function () { pairHostCode(); };
-  const pairJoin = $('#pair-join');
-  if (pairJoin) pairJoin.onclick = function () { pairJoinCode(); };
-  const pairIn = $('#pair-code-in');
-  if (pairIn) pairIn.addEventListener('keydown', function (e) { if (e.key === 'Enter') { try { pairJoinCode(); } catch (x) {} } });
   const pubMineCopy = $('#pub-mine-copy');
   if (pubMineCopy) pubMineCopy.onclick = pubCopyMine;
   const pubMineRefresh = $('#pub-mine-refresh');
@@ -16068,7 +15990,6 @@ function boot(){
       friendsRemoveMany: friendsRemoveMany,
       hubBanDevices: hubBanDevices,
       pubConnect: pubConnect,
-      pairHostCode: pairHostCode,
       msgMenu: msgMenu,
       sessMenu: sessMenu,
       multiToggle: multiToggle,
@@ -16080,7 +16001,6 @@ function boot(){
       chatSearchToggle: chatSearchToggle,
       chatSearchRun: chatSearchRun,
       chatSearchJump: chatSearchJump,
-      pairJoinCode: pairJoinCode,
       cardShareLink: cardShareLink,
       dedupeDirectSessions: dedupeDirectSessions,
       cardEncode: cardEncode,
