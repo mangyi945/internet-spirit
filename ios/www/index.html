@@ -4796,17 +4796,20 @@ function bindChannel(link, dc, session){
     clearInterval(link._hb);
     link._hb = setInterval(function () {
       if (!link.dc || link.dc.readyState !== 'open') return;
-      // 后台/息屏降频：心跳只用来判活，没必要每 25 秒打扰一次（省电）
-      const _hbGap = document.hidden ? 90000 : 25000;
-      const _nowHb = Date.now();
-      if (link._hbAt && _nowHb - link._hbAt < _hbGap - 1000) return;
-      link._hbAt = _nowHb;
-      if (_nowHb - (link._lastPong || 0) > (document.hidden ? 200000 : 35000)) {
+      const now = Date.now();
+      const rx = Math.max(link._lastRx || 0, link._lastPong || 0);
+      // 断线判定：前台 35 秒 / 后台 200 秒没有收到对方任何消息
+      if (now - rx > (document.hidden ? 200000 : 35000)) {
         try { dlog('P2P 心跳超时，关闭链路'); } catch (e) {}
         try { link.dc.close(); } catch (e) {}
         return;
       }
-      try { link.dc.send(JSON.stringify({ t: 'p2p-ping', ts: Date.now() })); } catch (e) {}
+      // 只在“安静”时才发 ping：有真实收发（聊天/文件/回包）就完全跳过
+      const idle = document.hidden ? 90000 : 30000;
+      if (now - rx < idle) return;
+      if (link._pingAt && now - link._pingAt < idle - 1000) return;
+      link._pingAt = now;
+      try { link.dc.send(JSON.stringify({ t: 'p2p-ping', ts: now })); } catch (e) {}
     }, 25000);
     // 中继：对端可能还没到，hello 会丢；每隔 2 秒补发，直到收到对端资料
     if (link._relay) {
@@ -4847,6 +4850,7 @@ function bindChannel(link, dc, session){
   };
   dc.onerror = () => {};
   dc.onmessage = e => {
+    link._lastRx = Date.now();      // 收到任何消息都算链路活着，心跳就不用再补发 ping
     if (typeof e.data === 'string') {
       let m; try { m = JSON.parse(e.data); } catch { return; }
       onControl(link, session, m);
@@ -10698,7 +10702,7 @@ async function pubConnect(){
 }
 
 /* ==================== 事件绑定 ==================== */
-const BUILD_STAMP = '2026-11-21 17:05';
+const BUILD_STAMP = '2026-11-21 17:20';
 
 // 自检更新：服务器上的 index.html 版本号和当前页面不一致时，用带时间戳的地址强制重载一次
 (function selfUpdateCheck(){
