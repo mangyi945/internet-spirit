@@ -1,0 +1,203 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>chrome</title>
+<style>
+:root{
+  --face:#c0c0c0; --face-hi:#dfdfdf; --face-sh:#808080; --face-dk:#0a0a0a;
+  --accent:#000080; --accent2:#1084d0;
+  --ink:#000; --ink-dim:#333;
+  --title-bg:linear-gradient(90deg,var(--accent),var(--accent2));
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0;background:var(--face);overflow:hidden;
+  font:11px "宋体",SimSun,sans-serif;color:var(--ink,#000);-webkit-text-size-adjust:100%;user-select:none}
+
+/* 和主界面同一套斜面：底色 = 面板色，1px/2px 双层内阴影 */
+.bevel{
+  background:var(--face);border:0;padding:0 5px;height:20px;line-height:20px;color:var(--ink,#000);
+  font:9px "宋体",SimSun,sans-serif;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  cursor:default;touch-action:manipulation;-webkit-tap-highlight-color:transparent;
+  box-shadow:inset -1px -1px var(--face-dk),inset 1px 1px #fff,
+             inset -2px -2px var(--face-sh),inset 2px 2px var(--face-hi);
+}
+.bevel:active{
+  box-shadow:inset -1px -1px #fff,inset 1px 1px var(--face-dk),
+             inset -2px -2px var(--face-hi),inset 2px 2px var(--face-sh);
+  padding-top:1px
+}
+
+/* ---- 标题栏 ---- */
+.titlebar{display:flex;align-items:center;gap:4px;height:24px;padding:0 2px 0 3px;
+  background:var(--title-bg);color:#fff;font-weight:bold;letter-spacing:.3px}
+.titlebar .tlogo{width:18px;height:18px;flex:0 0 18px;object-fit:cover;display:block;
+  image-rendering:pixelated;border:1px solid #000;background:#fff}
+.titlebar .ttl{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  font-size:12px;padding-left:2px}
+.titlebar .bevel{width:24px;height:18px;line-height:18px;padding:0;font:11px monospace;flex:0 0 24px}
+
+/* ---- 通用行 ---- */
+.row{display:flex;align-items:center;gap:3px;padding:3px 3px 0}
+.nav{width:26px;flex:0 0 26px;padding:0;font:10px "宋体",sans-serif}
+#url{flex:1 1 0;min-width:0;height:20px;font:10px Consolas,monospace;padding:0 4px;
+  border:1px solid;border-color:var(--face-sh) #fff #fff var(--face-sh);background:#fff;color:#000;outline:0}
+
+/* ---- 工具行：4 个工具 + 4 个常用，等宽 ---- */
+.tools button,.tools .slot{flex:1 1 0;min-width:0;padding:0 1px;font-size:9px}
+.tools .slot{height:20px;line-height:20px}
+
+/* ---- 标签条 ---- */
+.tabbar{display:flex;align-items:flex-end;gap:0;padding:3px 3px 0;overflow-x:auto;overflow-y:hidden}
+.tab{display:flex;align-items:center;gap:3px;max-width:160px;min-width:66px;height:21px;
+  padding:0 2px 0 6px;background:var(--face-sh);margin-right:-1px;flex:0 1 auto;
+  border:1px solid;border-color:var(--face-hi) var(--face-dk) var(--face-dk) var(--face-hi)}
+.tab.on{background:var(--face);height:24px;font-weight:bold;margin-bottom:-1px;
+  border-bottom-color:var(--face);z-index:2}
+.tab .t{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px}
+.tab .x{flex:0 0 14px;width:14px;height:14px;line-height:12px;padding:0;font:10px monospace;
+  background:var(--face);border:1px solid;border-color:var(--face-hi) var(--face-dk) var(--face-dk) var(--face-hi)}
+.tabbar .bevel.new{flex:0 0 26px;width:26px;height:22px;line-height:22px;padding:0;margin-left:2px}
+
+/* ---- 底部状态栏（独立 WebView，只在 statusmode 显示） ---- */
+.status{display:none;align-items:center;gap:6px;height:24px;padding:0 3px;background:var(--face)}
+.status .u{flex:1 1 auto;min-width:0;font:10px Consolas,monospace;color:var(--ink-dim,#333);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.status .bevel{flex:0 0 auto;padding:0 8px}
+
+body.statusmode #top{display:none}
+body.statusmode .status{display:flex}
+</style>
+
+<div id="top">
+  <div class="titlebar">
+    <img class="tlogo" id="ico" src="icon-32.png" alt="">
+    <span class="ttl" id="ttl">浏览器</span>
+    <button class="bevel" data-c="min" title="最小化">−</button>
+    <button class="bevel" data-c="max" title="最大化">□</button>
+    <button class="bevel" data-c="close" title="关闭">×</button>
+  </div>
+
+  <div class="row">
+    <button class="bevel nav" data-c="back" title="后退">◀</button>
+    <button class="bevel nav" data-c="fwd" title="前进">▶</button>
+    <button class="bevel nav" data-c="reload" title="刷新">⟳</button>
+    <button class="bevel nav" data-c="home" title="主页">⌂</button>
+    <input id="url" placeholder="输入网址或关键词" autocomplete="off" autocapitalize="off" spellcheck="false">
+    <button class="bevel" data-c="go">前往</button>
+    <button class="bevel" data-c="manage">管理</button>
+  </div>
+
+  <div class="row tools">
+    <button class="bevel" data-c="fav">☆收藏</button>
+    <button class="bevel" data-c="favlist">★收藏夹</button>
+    <button class="bevel" data-c="sniff">⌕嗅探</button>
+    <button class="bevel" data-c="dl">⇩下载</button>
+  </div>
+
+  <div class="tabbar" id="tabs"></div>
+</div>
+
+<div class="status" id="statusbar">
+  <span class="u" id="st">就绪</span>
+  <button class="bevel" data-c="incog" id="incog">无痕模式</button>
+</div>
+
+<script>
+(function () {
+  'use strict';
+  var $ = function (id) { return document.getElementById(id); };
+
+  function cmd(c, a) {
+    try {
+      if (!window.Bridge) return;
+      Bridge.cmd(a === undefined || a === null ? c : (c + '|' + a));
+    } catch (e) {}
+  }
+
+  document.querySelectorAll('[data-c]').forEach(function (b) {
+    b.onclick = function () {
+      var c = b.getAttribute('data-c');
+      if (c === 'go') cmd('go', $('url').value.trim());
+      else cmd(c);
+    };
+  });
+
+  $('url').addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') { cmd('go', this.value.trim()); this.blur(); }
+  });
+
+  /* 状态栏模式：同一个文件，只留底部那条 */
+  if (location.search.indexOf('m=status') >= 0) document.body.className = 'statusmode';
+
+  /* 头像：和主程序同源，直接读它的 localStorage；没有图片就用图标 */
+  try {
+    var me = JSON.parse(localStorage.getItem('hljjs.v2.me') || '{}');
+    if (me && me.avatar && String(me.avatar).indexOf('data:') === 0) $('ico').src = me.avatar;
+  } catch (e) {}
+
+  function el(tag, cls, text) {
+    var d = document.createElement(tag);
+    if (cls) d.className = cls;
+    if (text !== undefined) d.textContent = text;
+    return d;
+  }
+
+  window.Chrome = {
+    setSkin: function (j) {
+      try {
+        var o = JSON.parse(j || '{}'), r = document.documentElement.style;
+        var map = { face: '--face', hi: '--face-hi', sh: '--face-sh', dk: '--face-dk',
+                    accent: '--accent', accent2: '--accent2', ink: '--ink', inkDim: '--ink-dim' };
+        for (var k in map) if (o[k]) r.setProperty(map[k], o[k]);
+        if (o.titleA || o.titleB) {
+          r.setProperty('--title-bg', 'linear-gradient(90deg,' +
+            (o.titleA || o.accent || '#000080') + ',' + (o.titleB || o.accent2 || '#1084d0') + ')');
+        }
+      } catch (e) {}
+    },
+    setTitle: function (t) {
+      var n = $('ttl'); if (n) n.textContent = t || '浏览器';
+    },
+    setUrl: function (u) {
+      var n = $('url');
+      if (n && document.activeElement !== n) n.value = u || '';
+      var s = $('st'); if (s) s.textContent = u || '就绪';
+    },
+    setStatus: function (s) {
+      var n = $('st'); if (n) n.textContent = s || '';
+    },
+    setIncog: function (on) {
+      var b = $('incog'); if (!b) return;
+      b.textContent = on ? '无痕：开' : '无痕模式';
+      b.style.fontWeight = on ? 'bold' : 'normal';
+    },
+    setTabs: function (list, active) {
+      var box = $('tabs'); if (!box) return;
+      box.innerHTML = '';
+      (list || []).forEach(function (t, i) {
+        var d = el('div', 'tab' + (i === active ? ' on' : ''));
+        d.appendChild(el('span', 't', t));
+        var x = el('button', 'x', '×');
+        x.onclick = function (e) { e.stopPropagation(); cmd('closetab', i); };
+        d.appendChild(x);
+        d.onclick = function () { cmd('tab', i); };
+        box.appendChild(d);
+      });
+      var add = el('button', 'bevel new', '＋');
+      add.title = '新建标签页';
+      add.onclick = function () { cmd('newtab'); };
+      box.appendChild(add);
+    },
+    setSlots: function (list) {
+      var box = document.querySelector('.tools');
+      if (!box) return;
+      Array.prototype.forEach.call(box.querySelectorAll('.slot'), function (e) { e.remove(); });
+      (list || []).forEach(function (t, i) {
+        var b = el('button', 'bevel slot', t);
+        b.onclick = function () { cmd('slot', i); };
+        box.appendChild(b);
+      });
+    }
+  };
+})();
+</script>

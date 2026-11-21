@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PSP 模拟器</title>
+<style>
+  html,body{margin:0;height:100%;background:#111;color:#9ee89e;font:12px/1.6 monospace;overflow:hidden}
+  #bar{position:absolute;inset:0 0 auto 0;height:44px;background:#000;display:flex;align-items:center;
+       gap:8px;padding:0 9px;z-index:9;flex-wrap:nowrap;overflow-x:auto}
+  #bar button{background:#c0c0c0;color:#000;border:0;height:24px;padding:0 10px;font:11px monospace;
+       box-shadow:inset -1px -1px #0a0a0a,inset 1px 1px #fff,inset -2px -2px #808080,inset 2px 2px #dfdfdf}
+  #st{font-size:11px;color:#9ee89e;white-space:nowrap}
+  #game{position:absolute;inset:44px 0 0 0;background:#1b1b1b}
+  #log{position:absolute;left:0;right:0;bottom:0;max-height:52%;overflow:auto;background:rgba(0,0,0,.9);
+       color:#9ee89e;font-size:11px;padding:6px 8px;display:none;z-index:20;white-space:pre-wrap;margin:0}
+  #log.on{display:block}
+  /* 设置按钮保留（现在有中文语言包，界面是中文的） */
+  .ejs_menu_button { display: block !important; }
+  .err{color:#ff8a8a}
+  .ok{color:#7fdc7f}
+  .warn{color:#ffd479}
+</style>
+</head>
+<body>
+<div id="bar">
+  <button id="pick">选择游戏文件</button>
+  <button id="dbg">日志</button>
+  <button id="lang">EN</button>
+  <span id="st">请选择一个 .iso / .cso / .pbp 文件</span>
+  <span id="keys" style="font-size:10px;color:#ffd479;white-space:nowrap">方向键移动 · Z 确认 · X 取消 · Enter 开始 · 点 ☰ 改按键</span>
+</div>
+<div id="game"></div>
+<pre id="log"></pre>
+<script>
+  var st = document.getElementById('st');
+  var logEl = document.getElementById('log');
+  var logs = [];
+
+  function esc(s) {
+    return String(s).replace(/[&<>]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]; });
+  }
+  function log(msg, cls) {
+    var t = new Date().toISOString().substr(11, 8);
+    logs.push(t + '  ' + msg);
+    if (logs.length > 500) logs.shift();
+    logEl.innerHTML += '<span class="' + (cls || '') + '">' + t + '  ' + esc(msg) + '</span>\n';
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+  function setStatus(t) { st.textContent = t; }
+
+  document.getElementById('dbg').onclick = function () { logEl.classList.toggle('on'); };
+
+  window.onerror = function (msg, src, line) {
+    log('[JS错误] ' + msg + ' @ ' + (src || '?') + ':' + line, 'err');
+    setStatus('出错：' + msg);
+    return false;
+  };
+  window.addEventListener('unhandledrejection', function (e) {
+    log('[Promise失败] ' + (e.reason && e.reason.message || e.reason), 'err');
+  });
+  var origErr = console.error;
+  console.error = function () {
+    log('[console.error] ' + Array.prototype.slice.call(arguments).map(String).join(' '), 'err');
+    origErr.apply(console, arguments);
+  };
+  var origWarn = console.warn;
+  console.warn = function () {
+    log('[console.warn] ' + Array.prototype.slice.call(arguments).map(String).join(' '), 'warn');
+    origWarn.apply(console, arguments);
+  };
+
+  log('页面：' + location.href);
+  log('共享内存 SharedArrayBuffer：' + (typeof SharedArrayBuffer !== 'undefined' ? '可用' : '不可用'),
+      typeof SharedArrayBuffer !== 'undefined' ? 'ok' : 'err');
+  try {
+    var cv = document.createElement('canvas');
+    var gl2 = cv.getContext('webgl2');
+    log('WebGL2：' + (gl2 ? '可用' : '不可用'), gl2 ? 'ok' : 'err');
+  } catch (e) { log('WebGL 检测异常：' + e.message, 'err'); }
+
+  function probe(url) {
+    return fetch(url, { method: 'HEAD', cache: 'no-store' }).then(function (r) {
+      log('探测 ' + url + ' → HTTP ' + r.status + ' / ' + (r.headers.get('content-length') || '?') + ' 字节',
+          r.ok ? 'ok' : 'err');
+      return r.ok;
+    }).catch(function (e) {
+      log('探测 ' + url + ' → 失败：' + e.message, 'err');
+      return false;
+    });
+  }
+  probe('cores/ppsspp-thread-wasm.data');
+  probe('cores/ppsspp-thread-legacy-wasm.data');
+  probe('loader.js');
+  probe('emulator.min.js');
+
+  var loaded = false;
+
+  // 语言：默认中文，可用 ?lang=en-US 切换
+  var LANG = 'zh-CN';
+  try {
+    var _lang = new URLSearchParams(location.search).get('lang');
+    if (_lang) LANG = _lang;
+  } catch (e) {}
+  document.getElementById('lang').textContent = (LANG === 'zh-CN') ? 'EN' : '中';
+  document.getElementById('lang').onclick = function () {
+    var next = (LANG === 'zh-CN') ? 'en-US' : 'zh-CN';
+    var u = new URL(location.href);
+    u.searchParams.set('lang', next);
+    location.href = u.toString();
+  };
+  log('界面语言：' + LANG);
+  probe('localization/' + LANG + '.json');
+
+  document.getElementById('pick').onclick = function () {
+    var i = document.createElement('input');
+    i.type = 'file';
+    i.accept = '.iso,.cso,.pbp,.ISO,.CSO,.PBP,application/octet-stream';
+    i.onchange = function () {
+      var f = i.files && i.files[0];
+      if (!f) return;
+      var url = URL.createObjectURL(f);
+      setStatus('载入 ' + f.name + '（' + (f.size / 1048576).toFixed(1) + ' MB）…');
+      log('选择文件：' + f.name + ' / ' + f.size + ' 字节');
+      loaded = true;
+      window.__start(url, f.name);
+    };
+    i.click();
+  };
+
+  window.__boot = function (url, name) {
+    log('开始启动模拟器：' + url);
+    window.EJS_player = '#game';
+    window.EJS_core = 'ppsspp';
+    window.EJS_pathtodata = './';
+    window.EJS_gameUrl = url;
+    window.EJS_gameName = name || 'game';
+    window.EJS_threads = true;
+    window.EJS_startOnLoaded = true;
+    window.EJS_disableDatabases = true;
+    window.EJS_language = LANG;
+    window.EJS_defaultOptions = { 'defaultWebGL2': true };
+    // 关掉自带的英文界面按钮，只留全屏
+    window.EJS_Buttons = {
+      settings: true, playPause: true, restart: true, mute: true, volume: true,
+      fullscreen: true, saveState: false, loadState: false, gamepad: false,
+      cheat: false, screenRecord: false, exitEmulation: false, saveSavFiles: false,
+      loadSavFiles: false
+    };
+    window.EJS_ready = function () { setStatus('核心就绪 · ' + (name || '')); log('EJS_ready（核心就绪）', 'ok'); };
+    window.EJS_onGameStart = function () { setStatus('运行中 · ' + (name || '')); log('EJS_onGameStart（游戏开始）', 'ok'); };
+    var s = document.createElement('script');
+    s.src = 'loader.js';
+    s.onerror = function () { log('loader.js 加载失败（404？）', 'err'); setStatus('loader.js 加载失败'); };
+    s.onload = function () { log('loader.js 已加载'); };
+    document.body.appendChild(s);
+  };
+
+  window.__start = function (url, name) {
+    var old = document.getElementById('game');
+    if (old) { old.innerHTML = ''; old.id = 'game_old'; }
+    var g = document.createElement('div');
+    g.id = 'game';
+    document.body.appendChild(g);
+    if (window.EJS_emulator) { try { window.EJS_emulator.pause(); } catch (e) {} }
+    window.__boot(url, name);
+  };
+
+  // 接收宿主页面（App）发来的播放指令
+  window.addEventListener('message', function (ev) {
+    var d = ev.data || {};
+    if (d.type === 'hljjs-save') { window.__saveSlot(d.slot || 1); return; }
+    if (d.type === 'hljjs-load') { window.__loadSlot(d.slot || 1); return; }
+    if (d.type !== 'hljjs-play') return;
+    log('收到宿主指令：播放 ' + d.name);
+    setStatus('载入 ' + (d.name || '') + ' …');
+    window.__start(d.url, d.name);
+  });
+  try { if (window.parent && window.parent !== window) window.parent.postMessage({ type: 'hljjs-iframe-ready' }, '*'); } catch (e) {}
+
+  setStatus('请选择一个 .iso / .cso / .pbp 文件');
+  log('调试面板就绪，点顶部「日志」可收起/展开');
+
+  try {
+    var q = new URLSearchParams(location.search);
+    var g2 = q.get('game');
+    if (g2) {
+      setStatus('载入 ' + g2 + ' …');
+      log('URL 参数指定游戏：' + g2);
+      window.__start(g2, g2.split('/').pop());
+    }
+  } catch (e) { log('解析参数失败：' + e.message, 'err'); }
+</script>
+</body>
+</html>

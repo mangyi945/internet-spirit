@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CHIP-8 独立运行</title>
+<style>
+  html,body{margin:0;height:100%;background:#0b0f0b;color:#9ee89e;
+    font-family:"Consolas","Courier New",monospace;overflow:hidden}
+  #wrap{height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px}
+  canvas{background:#000;box-shadow:0 0 0 2px #2a5a2a, 0 0 40px rgba(80,255,80,.15);image-rendering:pixelated}
+  .bar{display:flex;gap:8px;align-items:center;font-size:12px}
+  button{background:#1a2a1a;color:#9ee89e;border:1px solid #3a6a3a;padding:4px 10px;cursor:pointer;
+    font-family:inherit;font-size:12px}
+  button:hover{background:#243a24}
+  .hint{font-size:11px;color:#5a8a5a;text-align:center;line-height:1.7}
+  .keys{font-size:10px;color:#4a7a4a;text-align:center;line-height:1.8;margin-top:4px}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="cv" width="512" height="256"></canvas>
+  <div class="bar">
+    <button id="pick">载入 .ch8</button>
+    <button id="demo">演示</button>
+    <button id="reset">重置</button>
+    <span id="rom" style="color:#6aa86a">未载入</span>
+  </div>
+  <div class="hint">拖一个 .ch8 文件进来，或点「载入」</div>
+  <div class="keys">
+    键盘映射：1 2 3 4 / Q W E R / A S D F / Z X C V<br>
+    对应 CHIP-8 的 1 2 3 C / 4 5 6 D / 7 8 9 E / A 0 B F
+  </div>
+</div>
+
+<script src="chip8.js"></script>
+<script>
+(function () {
+  const cv = document.getElementById('cv');
+  CHIP8.attach(cv);
+  CHIP8.loadDemo();
+
+  function load(file) {
+    file.arrayBuffer().then(buf => {
+      CHIP8.load(new Uint8Array(buf), file.name);
+      document.getElementById('rom').textContent = file.name;
+    });
+  }
+
+  document.getElementById('pick').onclick = () => {
+    const i = document.createElement('input');
+    i.type = 'file';
+    i.accept = '.ch8,.rom,application/octet-stream';
+    i.onchange = () => { if (i.files && i.files[0]) load(i.files[0]); };
+    i.click();
+  };
+  document.getElementById('demo').onclick = () => CHIP8.loadDemo();
+  document.getElementById('reset').onclick = () => CHIP8.reset();
+
+  document.addEventListener('dragover', e => e.preventDefault());
+  document.addEventListener('drop', e => {
+    e.preventDefault();
+    const f = e.dataTransfer.files && e.dataTransfer.files[0];
+    if (f) load(f);
+  });
+
+  document.addEventListener('keydown', e => {
+    const k = CHIP8_keyOf(e.key);
+    if (k >= 0) { CHIP8.press(k, true); e.preventDefault(); }
+  });
+  document.addEventListener('keyup', e => {
+    const k = CHIP8_keyOf(e.key);
+    if (k >= 0) { CHIP8.press(k, false); e.preventDefault(); }
+  });
+})();
+</script>
+</body>
+</html>
