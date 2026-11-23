@@ -22,7 +22,6 @@
   let audioCtx = null, audioNode = null, audioOn = false;
   let romName = '';
   let romBytes = null;   // 原始 ROM 留着：联机时要原样发给对方 / 重新开机
-  let romKey = '';       // 存档按 ROM 内容认，不按文件名：改名不丢档、换 ROM 不串档
 
   // 跳帧
   let autoSkip = true;
@@ -33,7 +32,6 @@
   let fpsEl = null;
   let buf32 = null;
   let lastHash = 0;      // 每帧画面的采样哈希，联机时用来对表
-  let frameErrs = 0;     // 连续帧异常次数：防止出错后一直空转假装在跑
 
   /* ---------- 加载 jsNES（懒加载） ---------- */
   function loadLib() {
@@ -162,22 +160,16 @@
     acc += Math.min(100, t - lastT);
     lastT = t;
 
-    // 60Hz：按累计时间跑帧。不能每帧都强行补 1 帧，否则 120Hz 屏幕上会跑成 120fps（游戏 2 倍速）
+    // 60Hz
     const STEP = 1000 / 60;
     let n = Math.floor(acc / STEP);
     acc -= n * STEP;
+    if (n < 1) n = 1;
     if (n > 3) n = 3;
-    if (n < 1) return;
 
     const t0 = performance.now();
     for (let i = 0; i < n; i++) {
-      try { nes.frame(); frameErrs = 0; } catch (e) { frameErrs++; dlogNav(e); break; }
-    }
-    if (frameErrs >= 4) {
-      frameErrs = 0;
-      try { stopLoop(); } catch (e) {}
-      try { HLJJS.api.toast('模拟器卡住了，已暂停；重开一次游戏'); } catch (e) {}
-      return;
+      try { nes.frame(); } catch (e) { dlogNav(e); break; }
     }
     const per = (performance.now() - t0) / n;
     emuAvg = emuAvg * 0.9 + per * 0.1;
@@ -443,8 +435,8 @@
       case 'down': return c.BUTTON_DOWN;
       case 'left': return c.BUTTON_LEFT;
       case 'right': return c.BUTTON_RIGHT;
-      case 'cross': return c.BUTTON_B;
-      case 'circle': return c.BUTTON_A;
+      case 'cross': return c.BUTTON_A;
+      case 'circle': return c.BUTTON_B;
       case 'square': return c.BUTTON_B;
       case 'triangle': return c.BUTTON_A;
       case 'start': return c.BUTTON_START;
@@ -469,8 +461,8 @@
 
   const KEYMAP = {
     ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right',
-    z: 'circle', Z: 'circle', x: 'cross', X: 'cross',
-    j: 'circle', J: 'circle', k: 'cross', K: 'cross',
+    z: 'cross', Z: 'cross', x: 'circle', X: 'circle',
+    j: 'cross', J: 'cross', k: 'circle', K: 'circle',
     Enter: 'start', Shift: 'select', ' ': 'start',
   };
 
@@ -480,77 +472,6 @@
     if (!tag) return;
     e.preventDefault();
     pressTag(tag, down);
-  }
-
-  /* ---------- 存档 / 读档 ----------
-     内核自带 toJSON/fromJSON（实测 Final Mission 状态 2.0 MB，
-     fromJSON 之后画面哈希和存档点完全一致）。体积太大不能放 localStorage，
-     所以走页面给的 IndexedDB 桥 window.HLJJS_NES_STORE。 */
-  let lastState = '';
-
-  function stateKey() { return romKey || ('nes:' + (romName || 'game')); }
-
-  /** ROM 内容的 32 位指纹（FNV-1a 抽样）：存档用它当 key，改名不丢档、换 ROM 不串档 */
-  function romKeyOf(u8) {
-    let h = 2166136261;
-    for (let i = 0; i < u8.length; i += 97) h = ((h ^ u8[i]) * 16777619) >>> 0;
-    h = ((h ^ (u8.length & 255)) * 16777619) >>> 0;
-    return 'nes:' + h.toString(16);
-  }
-
-  async function saveState() {
-    if (!nes) { HLJJS.api.toast('先载入一个 ROM'); return { ok: false, err: 'no-rom' }; }
-    if (NET.on) { HLJJS.api.toast('联机中不能存档'); return { ok: false, err: 'net' }; }
-    try {
-      const json = JSON.stringify(nes.toJSON());
-      lastState = json;
-      const bridge = window.HLJJS_NES_STORE;
-      let stored = false;
-      if (bridge && bridge.put) {
-        stored = await bridge.put(stateKey(), { json: json, rom: romName });
-        HLJJS.api.toast(stored ? ('已存档：' + romName + '（' + Math.round(json.length / 1024) + ' KB）')
-                               : '存档失败：本机存储写不进去');
-      } else {
-        HLJJS.api.toast('已存档（只在本次运行有效：这个页面没有存储桥）');
-      }
-      return { ok: true, bytes: json.length, stored: stored, key: stateKey() };
-    } catch (e) {
-      HLJJS.api.toast('存档失败：' + e.message);
-      return { ok: false, err: e.message };
-    }
-  }
-
-  async function loadState() {
-    if (!nes) { HLJJS.api.toast('先载入一个 ROM'); return { ok: false, err: 'no-rom' }; }
-    if (NET.on) { HLJJS.api.toast('联机中不能读档'); return { ok: false, err: 'net' }; }
-    let rec = null;
-    let from = 'disk';
-    try {
-      const bridge = window.HLJJS_NES_STORE;
-      if (bridge && bridge.get) rec = await bridge.get(stateKey());
-    } catch (e) {}
-    if (!rec && lastState) { rec = { json: lastState, rom: romName }; from = 'memory'; }
-    if (!rec || !rec.json) { HLJJS.api.toast('这个游戏还没有存档'); return { ok: false, err: 'no-state' }; }
-    // key 是按 ROM 内容算的，所以文件名不同也照样能读；只在旧的名字当 key 的存档上做一次核对
-    if (!romKey && rec.rom && romName && rec.rom !== romName) {
-      HLJJS.api.toast('存档是「' + rec.rom + '」的，和当前 ROM 不是同一个');
-      return { ok: false, err: 'rom-mismatch' };
-    }
-    const wasRunning = running;
-    try {
-      stopLoop();
-      nes.fromJSON(JSON.parse(rec.json));
-      lastState = rec.json;
-      paint();
-      if (wasRunning) startLoop();
-      HLJJS.api.toast('已读档：' + (rec.rom || romName) +
-        (rec.rom && romName && rec.rom !== romName ? '（当前文件名 ' + romName + '）' : ''));
-      return { ok: true, from: from, bytes: rec.json.length, rom: romName, savedRom: rec.rom || '' };
-    } catch (e) {
-      HLJJS.api.toast('读档失败：' + e.message);
-      try { if (wasRunning) startLoop(); } catch (x) {}
-      return { ok: false, err: e.message };
-    }
   }
 
   /* ---------- 载入 ROM ---------- */
@@ -572,8 +493,6 @@
       const lib = await loadLib();
       const buf = new Uint8Array(await file.arrayBuffer());
       romBytes = buf;
-      romKey = romKeyOf(buf);
-      lastState = '';        // 换 ROM 后别把上一个游戏的内存存档带过来
 
       if (!lib || !lib.NES) throw new Error('库结构异常');
       nes = new lib.NES({
@@ -635,11 +554,6 @@
     };
     if (HLJJS.api.addGameButton) HLJJS.api.addGameButton(skipOpt);
 
-    if (HLJJS.api.addGameButton) {
-      HLJJS.api.addGameButton({ label: '存档', title: '把当前进度存在本机（每个游戏一份）', onClick: saveState });
-      HLJJS.api.addGameButton({ label: '读档', title: '回到上次存档的位置', onClick: loadState });
-    }
-
     document.addEventListener('keydown', e => onKey(e, true));
     document.addEventListener('keyup', e => onKey(e, false));
 
@@ -667,8 +581,6 @@
   /** 联机收 ROM 后先存着，等房主说开始才真正开机 */
   function prepareRom(u8, name){
     romBytes = u8;
-    romKey = romKeyOf(u8);
-    lastState = '';
     romName = String(name || 'net-game.nes').replace(/\.nes$/i, '');
     try { loadLib().catch(function () {}); } catch (e) {}
     try {
@@ -687,7 +599,6 @@
   window.NES_EMU = {
     loadRom, loadUrl, pick, stopLoop, startLoop, press: pressTag,
     prepareRom: prepareRom, romInfo: romInfo,
-    saveState: saveState, loadState: loadState,
     startNet: startNet, netInput: netInput, netSum: netSum, armNet: armNet, stopNet: stopNet,
     state: () => ({ running, romName, net: NET.on, netFrame: NET.frame, netDelay: NET.delay,
                     desync: NET.desync, armed: NET.armed }),

@@ -53,6 +53,15 @@ public final class TorrentBridge {
         }
     }
     private static final java.util.HashMap<String, Boolean> PAUSED = new java.util.HashMap<String, Boolean>();
+    /* 任务清单持久化：App 重启后按原始磁链把任务加回去（以前只存 DHT 会话状态，任务表在内存里，重启就没了） */
+    private static final java.util.HashMap<String, String> URIS = new java.util.HashMap<String, String>();
+    private static final String TASKS_FILE = "bt-tasks.txt";
+    /* 选择性下载：id -> 被取消勾选（IGNORE）的文件序号；SEL_APPLIED 记录"已应用过"避免每 3 秒重复设置 */
+    private static final java.util.HashMap<String, java.util.HashSet<Integer>> IGNORED = new java.util.HashMap<>();
+    private static final java.util.HashSet<String> SEL_APPLIED = new java.util.HashSet<>();
+    private static final String SEL_FILE = "bt-select.txt";
+    private static final String RESUME_DIR = "bt-resume";
+    private static volatile boolean SEL_LOADED = false;
     /* 会话日志（libtorrent 的 SESSION_LOG），https tracker 排查时最有用 */
     private static final java.util.ArrayDeque<String> SESSLOG = new java.util.ArrayDeque<String>();
     private static void pushSess(String s) {
@@ -76,6 +85,7 @@ public final class TorrentBridge {
             Thread t = new Thread(new Runnable() {
                 @Override
                 public void run() {
+                    try { loadSelection(ctx); } catch (Throwable ignored) { }
                     try { ensureStarted(ctx); } catch (Throwable ignored) { }
                 }
             }, "bt-warm");
@@ -264,6 +274,242 @@ public final class TorrentBridge {
         return sp;
     }
 
+    private static File selFile(Context c) {
+        return new File(c.getFilesDir(), SEL_FILE);
+    }
+
+    /** 读「取消勾选」清单（启动时一次） */
+    private static synchronized void loadSelection(Context c) {
+        if (SEL_LOADED || c == null) return;
+        SEL_LOADED = true;
+        try {
+            File f = selFile(c);
+            if (!f.isFile() || f.length() == 0 || f.length() > 4L * 1024 * 1024) return;
+            byte[] b = new byte[(int) f.length()];
+            java.io.FileInputStream in = new java.io.FileInputStream(f);
+            try { int off = 0, r; while (off < b.length && (r = in.read(b, off, b.length - off)) > 0) off += r; }
+            finally { try { in.close(); } catch (Throwable ignored) { } }
+            String[] lines = new String(b, "UTF-8").split("\n");
+            for (int i = 0; i < lines.length; i++) {
+                String line = lines[i];
+                if (line == null || line.trim().isEmpty()) continue;
+                String[] pp = line.split("\t", 2);
+                if (pp.length < 2) continue;
+                try {
+                    java.util.HashSet<Integer> set = IGNORED.get(pp[0]);
+                    if (set == null) { set = new java.util.HashSet<Integer>(); IGNORED.put(pp[0], set); }
+                    set.add(Integer.parseInt(pp[1].trim()));
+                } catch (Throwable ignored) { }
+            }
+        } catch (Throwable e) {
+            Log.w(TAG, "loadSelection: " + e);
+        }
+    }
+
+    private static synchronized void saveSelection(Context c) {
+        try {
+            if (c == null) return;
+            StringBuilder sb = new StringBuilder();
+            for (java.util.Map.Entry<String, java.util.HashSet<Integer>> e : IGNORED.entrySet()) {
+                for (Integer idx : e.getValue()) sb.append(e.getKey()).append('\t').append(idx).append('\n');
+            }
+            File f = selFile(c);
+            File tmp = new File(c.getFilesDir(), SEL_FILE + ".tmp");
+            java.io.FileOutputStream out = new java.io.FileOutputStream(tmp, false);
+            try { out.write(sb.toString().getBytes("UTF-8")); out.flush(); }
+            finally { try { out.close(); } catch (Throwable ignored) { } }
+            if (!tmp.renameTo(f)) { try { f.delete(); } catch (Throwable ignored) { } tmp.renameTo(f); }
+        } catch (Throwable e) {
+            Log.w(TAG, "saveSelection: " + e);
+        }
+    }
+
+    /** 元数据到了以后，把用户不想要的文件设成 IGNORE（每个任务只做一次） */
+    static synchronized void applySelectionOnce(String id) {
+        if (SEL_APPLIED.contains(id)) return;
+        try {
+            TorrentHandle h = handleOf(id);
+            if (h == null) return;
+            TorrentInfo ti = h.torrentFile();
+            if (ti == null) return;
+            int n = ti.files().numFiles();
+            java.util.HashSet<Integer> off = IGNORED.get(id);
+            for (int i = 0; i < n; i++) {
+                boolean ign = off != null && off.contains(i);
+                try { h.filePriority(i, ign ? org.libtorrent4j.Priority.IGNORE : org.libtorrent4j.Priority.DEFAULT); }
+                catch (Throwable ignored) { }
+            }
+            SEL_APPLIED.add(id);
+        } catch (Throwable ignored) { }
+    }
+
+    /** 用户勾选/取消某个文件 */
+    public static String setFile(String id, int idx, boolean on) {
+        try {
+            java.util.HashSet<Integer> off = IGNORED.get(id);
+            if (off == null) { off = new java.util.HashSet<Integer>(); IGNORED.put(id, off); }
+            if (on) off.remove(Integer.valueOf(idx)); else off.add(Integer.valueOf(idx));
+            saveSelection(APP);
+            TorrentHandle h = handleOf(id);
+            if (h != null) {
+                try { h.filePriority(idx, on ? org.libtorrent4j.Priority.DEFAULT : org.libtorrent4j.Priority.IGNORE); }
+                catch (Throwable ignored) { }
+            }
+            return "ok";
+        } catch (Throwable e) {
+            return "err:" + e;
+        }
+    }
+
+    /** 播放器从某一段开始读：把顺序下载范围也挪过去（弱网下 seek 更快接上） */
+    static void sequentialFrom(String id, int first, int last) {
+        try {
+            TorrentHandle h = handleOf(id);
+            if (h == null) return;
+            h.setSequentialRange(Math.max(0, first), Math.max(0, last));
+        } catch (Throwable ignored) { }
+    }
+
+    private static File resumeDir(Context c) {
+        File d = new File(c.getFilesDir(), RESUME_DIR);
+        try { if (!d.isDirectory()) d.mkdirs(); } catch (Throwable ignored) { }
+        return d;
+    }
+
+    private static File resumeFile(Context c, String id) {
+        return new File(resumeDir(c), id + ".resume");
+    }
+
+    /** 收到 SAVE_RESUME_DATA 告警时落盘 */
+    private static void saveResumeData(Context c, org.libtorrent4j.alerts.SaveResumeDataAlert a) {
+        try {
+            String id = a.handle().infoHash().toHex();
+            byte[] buf = org.libtorrent4j.AddTorrentParams.writeResumeDataBuf(a.params());
+            if (buf == null || buf.length < 32) return;
+            File f = resumeFile(c, id);
+            File tmp = new File(f.getAbsolutePath() + ".tmp");
+            java.io.FileOutputStream out = new java.io.FileOutputStream(tmp, false);
+            try { out.write(buf); out.flush(); }
+            finally { try { out.close(); } catch (Throwable ignored) { } }
+            if (!tmp.renameTo(f)) { try { f.delete(); } catch (Throwable ignored) { } tmp.renameTo(f); }
+        } catch (Throwable e) {
+            Log.w(TAG, "saveResumeData: " + e);
+        }
+    }
+
+    /** 让所有任务把 resume data 报一遍（含元数据，下次启动直接恢复，不用重新找 peer 拿 metadata） */
+    static void requestResumeSaves() {
+        try {
+            for (int i = 0; i < ORDER.size(); i++) {
+                TorrentHandle h = handleOf(ORDER.get(i));
+                if (h == null) continue;
+                try { if (h.torrentFile() != null) h.saveResumeData(TorrentHandle.SAVE_INFO_DICT); } catch (Throwable ignored) { }
+            }
+        } catch (Throwable ignored) { }
+    }
+
+    /** 用 resume data 恢复任务；没有就返回 false 交给磁链重加 */
+    private static boolean restoreFromResume(Context c, String id) {
+        try {
+            File rf = resumeFile(c, id);
+            if (!rf.isFile() || rf.length() < 32 || rf.length() > 8L * 1024 * 1024) return false;
+            byte[] data = new byte[(int) rf.length()];
+            java.io.FileInputStream in = new java.io.FileInputStream(rf);
+            try { int off = 0, r; while (off < data.length && (r = in.read(data, off, data.length - off)) > 0) off += r; }
+            finally { try { in.close(); } catch (Throwable ignored) { } }
+            org.libtorrent4j.swig.error_code ec = new org.libtorrent4j.swig.error_code();
+            org.libtorrent4j.swig.add_torrent_params atp =
+                org.libtorrent4j.swig.libtorrent.read_resume_data_ex(org.libtorrent4j.Vectors.bytes2byte_vector(data), ec);
+            if (atp == null || ec.value() != 0) return false;
+            atp.setSave_path(SAVE_DIR.getAbsolutePath());
+            atp.setFlags(atp.getFlags().or_(TorrentFlags.AUTO_MANAGED));
+            SM.swig().async_add_torrent(atp);
+            return true;
+        } catch (Throwable e) {
+            Log.w(TAG, "restoreFromResume(" + id + "): " + e);
+            return false;
+        }
+    }
+
+    private static File tasksFile(Context c) {
+        return new File(c.getFilesDir(), TASKS_FILE);
+    }
+
+    /** 把任务表（id / 是否暂停 / 原始磁链）写盘 */
+    private static synchronized void saveTasks(Context c) {
+        try {
+            if (c == null) return;
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < ORDER.size(); i++) {
+                String id = ORDER.get(i);
+                String uri = URIS.get(id);
+                if (uri == null || uri.isEmpty()) continue;
+                boolean paused = PAUSED.containsKey(id) && Boolean.TRUE.equals(PAUSED.get(id));
+                sb.append(id).append('\t').append(paused ? '1' : '0').append('\t').append(uri).append('\n');
+            }
+            File f = tasksFile(c);
+            File tmp = new File(c.getFilesDir(), TASKS_FILE + ".tmp");
+            java.io.FileOutputStream out = new java.io.FileOutputStream(tmp, false);
+            try { out.write(sb.toString().getBytes("UTF-8")); out.flush(); }
+            finally { try { out.close(); } catch (Throwable ignored) { } }
+            if (!tmp.renameTo(f)) {
+                try { f.delete(); } catch (Throwable ignored) { }
+                tmp.renameTo(f);
+            }
+        } catch (Throwable e) {
+            Log.w(TAG, "saveTasks: " + e);
+        }
+    }
+
+    /** 启动时把上次的任务加回会话（按磁链重加，已下好的文件会被重新校验，进度不丢） */
+    private static synchronized void restoreTasks(Context c) {
+        try {
+            if (c == null || SM == null || SAVE_DIR == null) return;
+            File f = tasksFile(c);
+            if (!f.isFile() || f.length() == 0 || f.length() > 2L * 1024 * 1024) return;
+            byte[] b = new byte[(int) f.length()];
+            java.io.FileInputStream in = new java.io.FileInputStream(f);
+            try {
+                int off = 0, r;
+                while (off < b.length && (r = in.read(b, off, b.length - off)) > 0) off += r;
+            } finally { try { in.close(); } catch (Throwable ignored) { } }
+            String[] lines = new String(b, "UTF-8").split("\n");
+            int n = 0;
+            for (int i = 0; i < lines.length; i++) {
+                String line = lines[i];
+                if (line == null || line.trim().isEmpty()) continue;
+                String[] p = line.split("\t", 3);
+                if (p.length < 3) continue;
+                String id = p[0].trim();
+                String uri = p[2].trim();
+                boolean paused = "1".equals(p[1].trim());
+                if (id.isEmpty() || !uri.startsWith("magnet:")) continue;
+                try {
+                    if (SM.find(Sha1Hash.parseHex(id)) == null) {
+                        boolean byResume = restoreFromResume(c, id);
+                        if (!byResume) SM.download(uri, SAVE_DIR, TorrentFlags.AUTO_MANAGED);
+                    }
+                    if (ORDER.indexOf(id) < 0) ORDER.add(id);
+                    URIS.put(id, uri);
+                    if (paused) {
+                        PAUSED.put(id, true);
+                        TorrentHandle h = handleOf(id);
+                        if (h != null) h.pause();
+                    }
+                    n++;
+                } catch (Throwable e) {
+                    Log.w(TAG, "restore task failed " + id + ": " + e);
+                }
+            }
+            if (n > 0) {
+                pushAlert("TASK_RESTORE : 恢复 " + n + " 个下载任务");
+                BtService.start(c);
+            }
+        } catch (Throwable e) {
+            Log.w(TAG, "restoreTasks: " + e);
+        }
+    }
+
     private static File stateFile(Context c) {
         return new File(c.getFilesDir(), STATE_FILE);
     }
@@ -319,6 +565,7 @@ public final class TorrentBridge {
                     try { Thread.sleep(60000); } catch (InterruptedException ignored) { }
                     if (SM == null) { SAVER_ON = false; return; }
                     saveSessionState(c);
+                    try { requestResumeSaves(); } catch (Throwable ignored) { }
                 }
             }
         }, "bt-state-saver");
@@ -392,6 +639,17 @@ public final class TorrentBridge {
                         @Override public int[] types() { return null; }
                         @Override public void alert(org.libtorrent4j.alerts.Alert<?> a) {
                             try {
+                                if (a.type() == org.libtorrent4j.alerts.AlertType.SAVE_RESUME_DATA) {
+                                    try { saveResumeData(APP, (org.libtorrent4j.alerts.SaveResumeDataAlert) a); } catch (Throwable ignored) { }
+                                    return;
+                                }
+                                if (a.type() == org.libtorrent4j.alerts.AlertType.METADATA_RECEIVED) {
+                                    try {
+                                        String hid = ((org.libtorrent4j.alerts.TorrentAlert<?>) a).handle().infoHash().toHex();
+                                        SEL_APPLIED.remove(hid);
+                                        applySelectionOnce(hid);
+                                    } catch (Throwable ignored) { }
+                                }
                                 String t = String.valueOf(a.type());
                                 String msg = String.valueOf(a.message());
                                 if (t.indexOf("SESSION") >= 0) { pushSess(t + " : " + msg); return; }
@@ -419,6 +677,8 @@ public final class TorrentBridge {
                     LAST_ERR = "";
                     // 定期把 DHT 路由表写盘，下次启动直接恢复
                     startStateSaver(ctx);
+                    // 把上次没下完的任务加回来（否则重启 App 任务就"消失"了）
+                    try { restoreTasks(ctx); } catch (Throwable ignored) { }
                 } catch (Throwable e) {
                     LAST_ERR = String.valueOf(e);
                     Log.e(TAG, "session start failed: " + e, e);
@@ -496,6 +756,9 @@ public final class TorrentBridge {
             ensureDir(c);
             SM.download(uri, SAVE_DIR, TorrentFlags.AUTO_MANAGED);
             ORDER.add(hash);
+            URIS.put(hash, uri);
+            SEL_APPLIED.remove(hash);
+            saveTasks(c);
             // 磁链只带一两个 tracker 时补公共 tracker（等任务入队后再补，见 topUpTrackers）
             topUpTrackers(hash, uri);
             out.put("ok", true);
@@ -531,9 +794,11 @@ public final class TorrentBridge {
                 String id = ORDER.get(i);
                 TorrentHandle h = handleOf(id);
                 if (h == null) continue;
+                try { if (h.torrentFile() != null) applySelectionOnce(id); } catch (Throwable ignored) { }
                 TorrentStatus st = h.status();
                 JSONObject o = new JSONObject();
                 o.put("id", id);
+                o.put("magnet", URIS.containsKey(id) ? URIS.get(id) : "");
                 o.put("name", st.name() == null ? "" : st.name());
                 boolean meta = st.hasMetadata();
                 o.put("hasMeta", meta);
@@ -559,6 +824,7 @@ public final class TorrentBridge {
             if (h == null) return "no";
             h.pause();
             PAUSED.put(String.valueOf(id), true);
+            saveTasks(APP);
             return "ok";
         } catch (Throwable e) {
             return "err:" + e;
@@ -571,6 +837,7 @@ public final class TorrentBridge {
             if (h == null) return "no";
             h.resume();
             PAUSED.put(String.valueOf(id), false);
+            saveTasks(APP);
             return "ok";
         } catch (Throwable e) {
             return "err:" + e;
@@ -604,6 +871,8 @@ public final class TorrentBridge {
             SM.remove(h);
             ORDER.remove(id);
             PAUSED.remove(id);
+            URIS.remove(id);
+            saveTasks(c);
             if (ORDER.isEmpty()) BtService.stop(c);
             return "ok";
         } catch (Throwable e) {
@@ -620,16 +889,79 @@ public final class TorrentBridge {
             if (ti == null) return arr.toString();
             FileStorage fs = ti.files();
             int n = fs.numFiles();
+            applySelectionOnce(id);
+            java.util.HashSet<Integer> offSel = IGNORED.get(id);
+            long[] fp = null;
+            try { fp = h.fileProgress(); } catch (Throwable ignored) { }
             for (int i = 0; i < n; i++) {
                 JSONObject o = new JSONObject();
+                o.put("index", i);
+                o.put("selected", !(offSel != null && offSel.contains(i)));
                 o.put("path", fs.filePath(i));
                 try { o.put("size", fs.fileSize(i)); } catch (Throwable ignored) { o.put("size", 0); }
+                try { o.put("offset", fs.fileOffset(i)); } catch (Throwable ignored) { o.put("offset", 0L); }
+                try { if (fp != null && i < fp.length) o.put("done", fp[i]); } catch (Throwable ignored) { }
                 arr.put(o);
             }
         } catch (Throwable e) {
             Log.e(TAG, "files failed", e);
         }
         return arr.toString();
+    }
+
+    /* ---------------- 边下边播 ---------------- */
+
+    /** 流服务要用的只读访问器 */
+    static TorrentHandle handleForStream(String id) { return handleOf(id); }
+    static File saveDirForStream() { return SAVE_DIR; }
+
+    /** 把某个文件设成顺序下载 + 最高优先级，并给前几个 piece 加急（起播更快） */
+    private static void prioritize(String id, int idx) {
+        try {
+            TorrentHandle h = handleOf(id);
+            if (h == null) return;
+            TorrentInfo ti = h.torrentFile();
+            if (ti == null) return;
+            FileStorage fs = ti.files();
+            if (idx < 0 || idx >= fs.numFiles()) return;
+            long off = fs.fileOffset(idx);
+            long size = fs.fileSize(idx);
+            int pl = ti.pieceLength();
+            if (pl <= 0) return;
+            int first = (int) (off / pl);
+            int last = (int) ((off + Math.max(0, size - 1)) / pl);
+            try { h.filePriority(idx, org.libtorrent4j.Priority.TOP_PRIORITY); } catch (Throwable ignored) { }
+            try { h.setSequentialRange(first, last); } catch (Throwable ignored) { }
+            for (int p = first; p <= Math.min(last, first + 8); p++) {
+                try { h.setPieceDeadline(p, 1500); } catch (Throwable ignored) { }
+            }
+        } catch (Throwable ignored) { }
+    }
+
+    /** 播放器请求哪一段，就把那一段的 piece 提成最高优先级（mp4 的 moov 常在文件尾部） */
+    static void prioritizePieces(String id, int first, int last) {
+        try {
+            TorrentHandle h = handleOf(id);
+            if (h == null) return;
+            int a0 = Math.max(0, first);
+            int b0 = Math.max(a0, last);
+            for (int p = a0; p <= b0; p++) {
+                try { h.piecePriority(p, org.libtorrent4j.Priority.TOP_PRIORITY); } catch (Throwable ignored) { }
+                try { h.setPieceDeadline(p, 1200); } catch (Throwable ignored) { }
+            }
+        } catch (Throwable ignored) { }
+    }
+
+    /** 返回本地播放地址（http://127.0.0.1:port/bt/<hash>/<idx>），失败返回 err:... */
+    public static String stream(String id, int idx) {
+        try {
+            int port = BtStreamServer.ensureStarted();
+            if (port <= 0) return "err:流服务起不来";
+            prioritize(id, idx);
+            return "http://127.0.0.1:" + port + "/bt/" + id + "/" + idx;
+        } catch (Throwable e) {
+            return "err:" + e;
+        }
     }
 
     /** 给 BtService 用：返回 "个数|总速率|平均进度|名字"，没有活动任务返回 "" */
@@ -660,6 +992,8 @@ public final class TorrentBridge {
             return "";
         }
     }
+
+    /* ---------------- 网络变化监听（Android 侧，不依赖 WebView） ---------------- */
 
     /** 换网络后重建 socket / 重启 DHT / 重新宣布 tracker（Android 切 Wi-Fi ↔ 数据后必须做） */
     public static String networkReset() {

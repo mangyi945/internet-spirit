@@ -107,49 +107,79 @@ public class DirectLink {
         }
     }
 
-    /* ---------- 局域网扫描：找出同网段里也在监听 8643 的设备 ---------- */
+    /* ---------- 局域网扫描：找出同网段里也在监听 8643 的设备 ----------
+       ⚠️ 旧实现是「每个 IP 直接 new Thread」：254 个地址 × 多张网卡（Wi-Fi/蜂窝/VPN）
+       就是上千条线程，每条约 260ms 连接 + 900ms 读超时，扫描期间 App 直接被拖死。
+       现在：单个后台线程 + 固定 16 路并发 + 150ms 连接超时 + 互斥（同时只跑一轮）。 */
+    private volatile boolean scanning = false;
+
     public void scanLan() {
-        try {
-            java.util.Enumeration<java.net.NetworkInterface> ifs = java.net.NetworkInterface.getNetworkInterfaces();
-            java.util.List<String> prefixes = new ArrayList<>();
-            while (ifs.hasMoreElements()) {
-                java.net.NetworkInterface ni = ifs.nextElement();
-                if (!ni.isUp() || ni.isLoopback()) continue;
-                java.util.Enumeration<java.net.InetAddress> addrs = ni.getInetAddresses();
-                while (addrs.hasMoreElements()) {
-                    java.net.InetAddress a = addrs.nextElement();
-                    if (!(a instanceof java.net.Inet4Address)) continue;
-                    String ip = a.getHostAddress();
-                    if (ip.startsWith("192.168.") || ip.startsWith("10.") || ip.startsWith("172.")) {
-                        prefixes.add(ip.substring(0, ip.lastIndexOf('.') + 1));
-                    }
-                }
-            }
-            for (final String prefix : prefixes) {
-                for (int i = 1; i <= 254; i++) {
-                    final String host = prefix + i;
-                    new Thread(new Runnable() {
-                        @Override public void run() {
-                            try {
-                                Socket s = new Socket();
-                                s.connect(new InetSocketAddress(host, DEFAULT_PORT), 260);
-                                s.setSoTimeout(900);
-                                BufferedReader in = new BufferedReader(new InputStreamReader(s.getInputStream(), "UTF-8"));
-                                PrintWriter out = new PrintWriter(new OutputStreamWriter(s.getOutputStream(), "UTF-8"), true);
-                                out.println("HI|" + safeId());
-                                String line = in.readLine();
-                                try { s.close(); } catch (Exception ignored) { }
-                                if (line != null && line.startsWith("HI|")) {
-                                    emit("{\"type\":\"found\",\"addr\":\"" + esc(host) + "\",\"peer\":\"" + esc(line.substring(3)) + "\"}");
-                                }
-                            } catch (Exception ignored) { }
+        if (scanning) return;
+        scanning = true;
+        new Thread(new Runnable() {
+            @Override public void run() {
+                final java.util.concurrent.ExecutorService pool =
+                        java.util.concurrent.Executors.newFixedThreadPool(16);
+                try {
+                    java.util.Enumeration<java.net.NetworkInterface> ifs = java.net.NetworkInterface.getNetworkInterfaces();
+                    java.util.List<String> prefixes = new ArrayList<>();
+                    final java.util.List<String> own = new ArrayList<>();
+                    while (ifs.hasMoreElements()) {
+                        java.net.NetworkInterface ni = ifs.nextElement();
+                        if (!ni.isUp() || ni.isLoopback()) continue;
+                        java.util.Enumeration<java.net.InetAddress> addrs = ni.getInetAddresses();
+                        while (addrs.hasMoreElements()) {
+                            java.net.InetAddress a = addrs.nextElement();
+                            if (!(a instanceof java.net.Inet4Address)) continue;
+                            String ip = a.getHostAddress();
+                            if (ip == null || ip.indexOf('.') < 0) continue;
+                            if (!own.contains(ip)) own.add(ip);
+                            if (ip.startsWith("192.168.") || ip.startsWith("10.") || ip.startsWith("172.")) {
+                                String pfx = ip.substring(0, ip.lastIndexOf('.') + 1);
+                                if (!prefixes.contains(pfx)) prefixes.add(pfx);
+                            }
                         }
-                    }).start();
+                    }
+                    for (final String prefix : prefixes) {
+                        for (int i = 1; i <= 254; i++) {
+                            final String host = prefix + i;
+                            if (own.contains(host)) continue;   // 别探自己（会跟自己握手、刷一串 open/close）
+                            pool.execute(new Runnable() {
+                                @Override public void run() {
+                                    probe(host);
+                                }
+                            });
+                        }
+                    }
+                    try { pool.awaitTermination(15, java.util.concurrent.TimeUnit.SECONDS); } catch (Throwable ignored) { }
+                    Log.d("DirectLink", "scanLan done prefixes=" + prefixes.size());
+                } catch (Throwable e) {
+                    Log.w("DirectLink", "scanLan: " + e.getMessage());
+                } finally {
+                    try { pool.shutdownNow(); } catch (Throwable ignored) { }
+                    scanning = false;
                 }
             }
-            Log.d("DirectLink", "scanLan prefixes=" + prefixes.size());
-        } catch (Throwable e) {
-            Log.w("DirectLink", "scanLan: " + e.getMessage());
+        }, "direct-scan").start();
+    }
+
+    /** 探测一台主机：连上、报 HI，等对方回 HI（150ms 连接超时，1s 读超时） */
+    private void probe(String host) {
+        Socket s = null;
+        try {
+            s = new Socket();
+            s.connect(new InetSocketAddress(host, DEFAULT_PORT), 150);
+            s.setSoTimeout(1000);
+            BufferedReader in = new BufferedReader(new InputStreamReader(s.getInputStream(), "UTF-8"));
+            PrintWriter out = new PrintWriter(new OutputStreamWriter(s.getOutputStream(), "UTF-8"), true);
+            out.println("HI|" + safeId());
+            String line = in.readLine();
+            if (line != null && line.startsWith("HI|")) {
+                emit("{\"type\":\"found\",\"addr\":\"" + esc(host) + "\",\"peer\":\"" + esc(line.substring(3)) + "\"}");
+            }
+        } catch (Exception ignored) {
+        } finally {
+            try { if (s != null) s.close(); } catch (Exception ignored) { }
         }
     }
 

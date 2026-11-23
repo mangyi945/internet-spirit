@@ -841,6 +841,10 @@ private void initTts() {
 
     private void copyAsset(String name, File dst) throws Exception {
         if (dst.exists() && dst.length() > 0) return;
+        copyAssetForce(name, dst);
+    }
+
+    private void copyAssetForce(String name, File dst) throws Exception {
         java.io.InputStream in = getAssets().open(name);
         try {
             java.io.FileOutputStream out = new java.io.FileOutputStream(dst);
@@ -850,6 +854,41 @@ private void initTts() {
                 while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
             } finally { out.close(); }
         } finally { in.close(); }
+    }
+
+    /** 包里这个资产文件的 SHA-1（用来判断"装了新包但手机上的副本还是旧的"） */
+    private String assetSha1(String name) {
+        try {
+            java.io.InputStream in = getAssets().open(name);
+            try {
+                java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-1");
+                byte[] buf = new byte[65536];
+                int n;
+                while ((n = in.read(buf)) > 0) md.update(buf, 0, n);
+                StringBuilder sb = new StringBuilder();
+                for (byte x : md.digest()) sb.append(String.format("%02x", x));
+                return sb.toString();
+            } finally { in.close(); }
+        } catch (Throwable e) {
+            return "";
+        }
+    }
+
+    /**
+     * 资产变了才覆盖。
+     * 原来一律用 copyAsset()（dst 已存在就跳过），结果**装了新 APK，手机上的 serve.py / index.html
+     * 还是第一次部署那份**——中枢缺 hubFp / 缺修复，查半天才发现跑的是十几天前的代码。
+     * 用户数据（hubs.json、hub-config.json、.hljjs-hub）不在这里覆盖。
+     */
+    private void copyAssetIfChanged(String name, File dst) throws Exception {
+        String h = assetSha1(name);
+        android.content.SharedPreferences sp = getSharedPreferences("phonedep-assets", MODE_PRIVATE);
+        String key = "sha1:" + name;
+        boolean has = dst.exists() && dst.length() > 0;
+        if (has && (h.isEmpty() || h.equals(sp.getString(key, "")))) return;
+        copyAssetForce(name, dst);
+        if (!h.isEmpty()) sp.edit().putString(key, h).apply();
+        try { android.util.Log.i("hljjs", "phonedep asset updated: " + name); } catch (Throwable ignored) { }
     }
 
     private void copyAssetDir(String assetPath, File dst) throws Exception {
@@ -865,8 +904,10 @@ private void initTts() {
         }
     }
 
-    /* 清掉上次进程残留的 serve.py（App 重启/装新包后旧中枢进程还在跑，会白吃 CPU 和内存） */
-    private void killStalePhoneHubs() {
+    /* 清掉上次进程残留的 serve.py / cloudflared
+       （App 重启或装新包后旧进程还在：serve.py 白吃 CPU，cloudflared 会留一条指向死端口的隧道，
+        那条地址在界面上看起来还「已开」，实际打开是 502 —— 之前就是这里漏杀，导致旧地址全死） */
+    private void killProcsMatching(String needle) {
         try {
             String[] dirs = new java.io.File("/proc").list();
             if (dirs == null) return;
@@ -879,7 +920,7 @@ private void initTts() {
                     byte[] buf = java.nio.file.Files.readAllBytes(
                             new java.io.File("/proc/" + d + "/cmdline").toPath());
                     String cmd = new String(buf).replace('\0', ' ').trim();
-                    if (cmd.contains("phonedep/serve.py")) {
+                    if (cmd.contains(needle)) {
                         android.os.Process.killProcess(pid);
                     }
                 } catch (Throwable ignored) { }
@@ -887,19 +928,34 @@ private void initTts() {
         } catch (Throwable ignored) { }
     }
 
+    private void killStalePhoneHubs() { killProcsMatching("phonedep/serve.py"); }
+
+    /* 只清隧道进程，保留中枢 serve.py（「关闭公网」时用） */
+    private void killStaleTunnels() { killProcsMatching("libcloudflared.so"); }
+
     private String phoneHubStartImpl() {
         if ("running".equals(phoneHubState) || "tunnel".equals(phoneHubState)) return "already:" + phoneHubUrl;
+        if ("ready".equals(phoneHubState)) {
+            // 已经部署好且隧道进程还活着：直接返回，别再起一套（会多一条隧道，旧地址立即作废）
+            if (phoneTunnelProc != null && phoneTunnelProc.isAlive()) return "already:" + phoneHubUrl;
+            phoneHubState = "idle";   // 状态说 ready 但进程没了（App 被杀过）：从头重开
+            phoneHubUrl = "";
+        }
         killStalePhoneHubs();
+        killStaleTunnels();
+        phoneHubUrl = "";
         phoneHubState = "running";
         new Thread(new Runnable() {
             public void run() {
                 try {
                     File dir = phoneDepDir();
-                    copyAsset("serve.py", new File(dir, "serve.py"));
-                    copyAsset("index.html", new File(dir, "index.html"));
-                    copyAsset("sitecustomize.py", new File(dir, "sitecustomize.py"));
-                    copyAsset("hubs.json", new File(dir, "hubs.json"));
-                    copyAsset("cacert.pem", new File(dir, "cacert.pem"));
+                    // 内容变了的资产要覆盖（否则装了新包手机还在跑旧 serve.py/index.html）
+                    copyAssetIfChanged("serve.py", new File(dir, "serve.py"));
+                    copyAssetIfChanged("hubid.py", new File(dir, "hubid.py"));   // 中枢 P-256 身份（纯 Python）
+                    copyAssetIfChanged("index.html", new File(dir, "index.html"));
+                    copyAssetIfChanged("sitecustomize.py", new File(dir, "sitecustomize.py"));
+                    copyAsset("hubs.json", new File(dir, "hubs.json"));       // 串联列表：属于用户数据，别覆盖
+                    copyAssetIfChanged("cacert.pem", new File(dir, "cacert.pem"));
 
                     File stdlib = new File(dir, "stdlib14");
                     if (!new File(stdlib, "encodings").exists()) {
@@ -918,6 +974,16 @@ ProcessBuilder pb = new ProcessBuilder(py, serve, String.valueOf(hubPort));
                     pb.environment().put("PYTHONPATH", stdlib.getAbsolutePath() + ":" + dir.getAbsolutePath());
                     pb.environment().put("SSL_CERT_FILE", new File(dir, "cacert.pem").getAbsolutePath());
                     pb.environment().put("HLJJS_TUNNEL", "1");
+                    try { pb.environment().put("HLJJS_DEVICE", (Build.MODEL == null ? "phone" : Build.MODEL)); } catch (Throwable ignored) { }
+                    // 中枢自己的数据目录（串联列表 links.json / 身份密钥）：必须显式指定，
+                    // 否则 serve.py 用 ~/.hljjs-hub，手机上 HOME 没设 → 落到奇怪位置甚至写不进去
+                    try {
+                        File hubData = new File(dir, "hubdata");
+                        File legacy = new File(dir, "~" + File.separator + ".hljjs-hub");
+                        if (!hubData.exists() && legacy.isDirectory()) { legacy.renameTo(hubData); }
+                        hubData.mkdirs();
+                        pb.environment().put("HLJJS_HUB_DATA", hubData.getAbsolutePath());
+                    } catch (Throwable ignored) { }
                     pb.environment().put("PYTHONWARNINGS", "ignore");   // 别让 SyntaxWarning 混进 err 日志
                     pb.environment().put("PYTHONUNBUFFERED", "1");
                     pb.redirectErrorStream(true);
@@ -1036,6 +1102,7 @@ ProcessBuilder pb = new ProcessBuilder(py, serve, String.valueOf(hubPort));
         @JavascriptInterface
         public String phoneHubStop() {
             try { if (phoneTunnelProc != null) { phoneTunnelProc.destroy(); phoneTunnelProc = null; } } catch (Throwable e) { }
+            killStaleTunnels();   // 上个 App 进程留下的 cloudflared 也一并清掉
             phoneHubUrl = "";
             phoneHubState = (phoneHubProc != null && phoneHubProc.isAlive()) ? "hub-only" : "idle";
             return "stopped";
@@ -1114,6 +1181,16 @@ ProcessBuilder pb = new ProcessBuilder(py, serve, String.valueOf(hubPort));
         @JavascriptInterface
         public String btFiles(String id) {
             try { return TorrentBridge.files(id); } catch (Throwable e) { return "[]"; }
+        }
+
+        @JavascriptInterface
+        public String btStream(String id, int idx) {
+            try { return TorrentBridge.stream(id, idx); } catch (Throwable e) { return "err:" + e; }
+        }
+
+        @JavascriptInterface
+        public String btSetFile(String id, int idx, boolean on) {
+            try { return TorrentBridge.setFile(id, idx, on); } catch (Throwable e) { return "err:" + e; }
         }
 
         /* 分享时记录文件 MIME（sharePrepare 写、shareOpen 用） */
@@ -1575,6 +1652,51 @@ ProcessBuilder pb = new ProcessBuilder(py, serve, String.valueOf(hubPort));
                 }
             });
             return true;
+        }
+
+        /** 把 dataURL 表情存进相册（Pictures/互联网精神与世长存），长按保存用 */
+        @JavascriptInterface
+        public String saveStickerImage(final String dataUrl, final String name) {
+            try {
+                String u = dataUrl == null ? "" : dataUrl;
+                int comma = u.indexOf(',');
+                if (comma < 0) return "err:bad-data";
+                String meta = u.substring(0, comma);
+                String b64 = u.substring(comma + 1);
+                String mime = "image/png";
+                int m = meta.indexOf("data:");
+                int semi = meta.indexOf(';');
+                if (m >= 0 && semi > m) mime = meta.substring(m + 5, semi);
+                byte[] data = Base64.decode(b64, Base64.DEFAULT);
+                String fn = (name == null || name.length() == 0) ? ("sticker-" + System.currentTimeMillis()) : name;
+                fn = fn.replace("/", "_").replace("\\", "_").replace("..", "_");
+                String _lfn = fn.toLowerCase(Locale.ROOT);
+                if (!_lfn.endsWith(".png") && !_lfn.endsWith(".jpg") && !_lfn.endsWith(".jpeg") && !_lfn.endsWith(".webp")) fn += ".png";
+                String rel = Environment.DIRECTORY_PICTURES + "/互联网精神与世长存";
+                if (Build.VERSION.SDK_INT >= 29) {
+                    ContentValues cv = new ContentValues();
+                    cv.put(MediaStore.Images.Media.DISPLAY_NAME, fn);
+                    cv.put(MediaStore.Images.Media.MIME_TYPE, mime);
+                    cv.put(MediaStore.Images.Media.RELATIVE_PATH, rel);
+                    Uri uri = getContentResolver().insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cv);
+                    if (uri == null) return "err:no-uri";
+                    OutputStream os = getContentResolver().openOutputStream(uri);
+                    if (os == null) return "err:no-stream";
+                    os.write(data);
+                    os.close();
+                    return "ok:" + fn;
+                }
+                File dir = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES), "互联网精神与世长存");
+                dir.mkdirs();
+                File f = new File(dir, fn);
+                FileOutputStream fo = new FileOutputStream(f);
+                fo.write(data);
+                fo.close();
+                sendBroadcast(new Intent(Intent.ACTION_MEDIA_SCANNER_SCAN_FILE, Uri.fromFile(f)));
+                return "ok:" + f.getAbsolutePath();
+            } catch (Throwable e) {
+                return "err:" + e;
+            }
         }
 
         @JavascriptInterface

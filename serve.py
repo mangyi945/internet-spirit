@@ -12,7 +12,6 @@ import random
 import hashlib
 import hmac
 import asyncio
-import urllib.parse
 import urllib.request
 import concurrent.futures
 import base64
@@ -29,16 +28,6 @@ try:
     import edge_tts as _edge
 except Exception:
     _edge = None
-
-# 可选：中枢身份签名（P-256）。没装 cryptography 就退化成「未验签」模式，老行为不变。
-try:
-    from cryptography.hazmat.primitives.asymmetric import ec as _ec
-    from cryptography.hazmat.primitives import hashes as _hashes, serialization as _ser
-    from cryptography.hazmat.primitives.asymmetric.utils import (
-        decode_dss_signature as _der_split, encode_dss_signature as _der_join)
-    _CRYPTO = True
-except Exception:
-    _CRYPTO = False
 
 try:
     sys.stdout.reconfigure(line_buffering=True)
@@ -63,120 +52,39 @@ SITES_LOCK = threading.Lock()
 SITE_TTL = 60
 
 
-def tts_local_alive():
-    """9880 有没有在监听（只探端口，不加载模型）。"""
-    try:
-        with socket.create_connection(('127.0.0.1', 9880), timeout=0.3):
-            return True
-    except Exception:
-        return False
-
-
 def ensure_local_tts():
-    """本地语音（9880）没在跑就按需拉起。
-
-    返回 True = 这次真的起了进程（调用方应回 warming 让前端等模型加载）；
-    60 秒内只尝试一次，避免并发请求拉起一堆 python。
-    """
-    global TTS_WARM_UNTIL, TTS_LAST_START, TTS_PROC
+    """配置了本地语音但 9880 没起来时，启动时顺手拉起来（后台，不占窗口）。"""
     cfg = tts_local_cfg()
     if not cfg:
-        return False
-    if TTS_USER_STOPPED:
-        return False
-    if tts_local_alive():
-        return False
-    now = time.time()
-    with TTS_START_LOCK:
-        if now - TTS_LAST_START < 60:
-            return False
-        TTS_LAST_START = now
+        return
+    try:
+        with socket.create_connection(('127.0.0.1', 9880), timeout=0.4):
+            return
+    except Exception:
+        pass
     exe = os.path.join(ROOT, 'tts-local', 'venv', 'Scripts', 'python.exe')
-    exe_w = os.path.join(ROOT, 'tts-local', 'venv', 'Scripts', 'pythonw.exe')
-    if os.path.isfile(exe_w):
-        exe = exe_w
     cwd = os.path.join(ROOT, 'tts-local', 'src', 'GPT-SoVITS-main')
     conf = os.path.join(cwd, 'GPT_SoVITS', 'configs', 'tts_infer.yaml')
     if not (os.path.isfile(exe) and os.path.isfile(conf)):
-        return False
+        return
     log = os.path.join(ROOT, 'tts-local', 'logs', 'api-auto.log')
     try:
         os.makedirs(os.path.dirname(log), exist_ok=True)
         f = open(log, 'ab')
-        # CREATE_NO_WINDOW：不再弹黑窗口；CREATE_NEW_PROCESS_GROUP 方便整组结束
-        flags = 0x08000000 | 0x00000200
+        flags = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
         env = dict(os.environ)
         # 关键：不加这个，日文里的「・」会让服务端 print 抛 GBK 编码错误 → 400 → 变成别的声线
         env['PYTHONIOENCODING'] = 'utf-8'
         env['PYTHONUTF8'] = '1'
-        TTS_PROC = subprocess.Popen([exe, 'api_v2.py', '-a', '127.0.0.1', '-p', '9880',
+        subprocess.Popen([exe, 'api_v2.py', '-a', '127.0.0.1', '-p', '9880',
                           '-c', 'GPT_SoVITS/configs/tts_infer.yaml'],
                          cwd=cwd, stdout=f, stderr=f, stdin=subprocess.DEVNULL,
                          env=env, creationflags=flags)
-        TTS_WARM_UNTIL = time.time() + 240
-        print('  [语音] 本地语音服务没在跑，已按需拉起（约 30-60 秒就绪）')
-        return True
+        global TTS_WARM_UNTIL
+        TTS_WARM_UNTIL = time.time() + 180
+        print('  [语音] 本地语音服务没在跑，已在后台拉起（约 30 秒就绪）')
     except Exception as e:
         print('  [语音] 后台启动失败：%s' % e)
-        return False
-
-
-def tts_stop_local(mark=True):
-    """停掉 9880；mark=True = 用户手动停，看门狗不再自动拉起。"""
-    global TTS_USER_STOPPED, TTS_PROC, TTS_WARM_UNTIL
-    if mark:
-        TTS_USER_STOPPED = True
-    TTS_WARM_UNTIL = 0.0
-    pid = None
-    p = TTS_PROC
-    TTS_PROC = None
-    if p is not None:
-        pid = p.pid
-    try:
-        import subprocess as _sp
-        out = _sp.run(['netstat', '-ano'], capture_output=True, text=True, timeout=8).stdout
-        for line in out.splitlines():
-            if '127.0.0.1:9880' in line and 'LISTENING' in line.upper():
-                parts = line.split()
-                if parts:
-                    try:
-                        pid = int(parts[-1])
-                    except Exception:
-                        pass
-    except Exception:
-        pass
-    if pid:
-        try:
-            import subprocess as _sp
-            _sp.run(['taskkill', '/PID', str(pid), '/T', '/F'], capture_output=True, timeout=10)
-        except Exception:
-            pass
-    time.sleep(0.3)
-    return not tts_local_alive()
-
-
-def tts_warm_reset():
-    global TTS_WARM_UNTIL
-    TTS_WARM_UNTIL = 0.0
-
-
-def tts_watchdog_loop():
-    """9880 掉了就自动拉起（中枢重启后听书也能自己恢复）。"""
-    if (os.environ.get('HLJJS_TTS_AUTOSTART') or '').strip() == '0':
-        return
-    time.sleep(15)
-    while True:
-        try:
-            fresh = (time.time() - TTS_LAST_USE) < 600 if TTS_LAST_USE else False
-            if tts_local_cfg() and not tts_local_alive() and fresh and not TTS_USER_STOPPED:
-                if time.time() - TTS_LAST_START > 120:
-                    print('  [语音] 看门狗：最近用过听书，自动拉起（隐藏窗口）')
-                    ensure_local_tts()
-            elif tts_local_alive():
-                tts_warm_reset()
-        except Exception:
-            pass
-        time.sleep(20)
 
 
 def _lan_ips():
@@ -418,12 +326,7 @@ def packs_get(pid):
             return it
     return None
 TTS_WARM_UNTIL = 0.0
-TTS_USER_STOPPED = False
-TTS_LAST_USE = 0.0
-TTS_PROC = None
 TTS_LOCAL_LOCK = threading.Lock()
-TTS_START_LOCK = threading.Lock()
-TTS_LAST_START = 0.0
 
 
 def tts_log(msg):
@@ -725,92 +628,6 @@ def global_ipv6():
 
 LAN_BEACON_PORT = 38421
 LAN_BEACON_NAME = ''
-LAN_HUBS = {}          # ip -> {'url':.., 'name':.., 'at': ts}  局域网里听到的中枢
-
-
-def lan_hub_listen_loop():
-    """听别的中枢（电脑/手机）广播，记下来；客户端地址失效时用 /__lan/hubs 自愈。"""
-    try:
-        import socket as _sock
-    except Exception:
-        return
-    so = None
-    while True:
-        try:
-            if so is None:
-                so = _sock.socket(_sock.AF_INET, _sock.SOCK_DGRAM)
-                so.setsockopt(_sock.SOL_SOCKET, _sock.SO_REUSEADDR, 1)
-                try:
-                    so.setsockopt(_sock.SOL_SOCKET, _sock.SO_BROADCAST, 1)
-                except Exception:
-                    pass
-                so.bind(('', LAN_BEACON_PORT))
-                so.settimeout(30)
-            data, addr = so.recvfrom(512)
-            msg = data.decode('utf-8', 'ignore')
-            parts = msg.split('|')
-            if len(parts) >= 2 and parts[0] == 'HLJJS1' and parts[1].startswith('http'):
-                ip = addr[0]
-                # 自己广播的也收得到，别把自己列进去
-                try:
-                    if parts[1].rstrip('/') == 'http://%s:%d' % (lan_ip(), PORT):
-                        continue
-                except Exception:
-                    pass
-                with SIGNAL_LOCK:
-                    LAN_HUBS[ip] = {'url': parts[1].rstrip('/'),
-                                    'name': (parts[2] if len(parts) > 2 else ''),
-                                    'id': (parts[3] if len(parts) > 3 else ''),
-                                    'fp': (parts[4] if len(parts) > 4 else ''),
-                                    'at': time.time()}
-        except Exception:
-            try:
-                if so is not None:
-                    so.settimeout(30)
-            except Exception:
-                so = None
-            time.sleep(1)
-
-def hub_peer_heal_loop():
-    """串联中枢按身份自愈：地址挂了，但局域网里还能听到同一个中枢 id，就把 URL 换过来。"""
-    time.sleep(10)
-    while True:
-        try:
-            with HUB_PEER_LOCK:
-                peers = [dict(v) for v in HUB_PEERS.values()]
-            for p in peers:
-                pid = str(p.get('id') or '')
-                url = str(p.get('url') or '').rstrip('/')
-                if not pid or not url:
-                    continue
-                alive = False
-                try:
-                    hub_http_json(url + '/__info', timeout=3)
-                    alive = True
-                except Exception:
-                    alive = False
-                if alive:
-                    continue
-                now4 = time.time()
-                newurl = ''
-                with SIGNAL_LOCK:
-                    for _ip, h in LAN_HUBS.items():
-                        if h.get('id') != pid:
-                            continue
-                        if now4 - float(h.get('at') or 0) > 120:
-                            continue
-                        newurl = str(h.get('url') or '')
-                        break
-                if newurl and newurl != url:
-                    hub_peer_add(pid, newurl, p.get('name'), p.get('key'), p.get('pub'), p.get('fp'), p.get('verified'))
-                    try:
-                        print('[hub] 串联自愈：%s %s -> %s' % (p.get('name') or pid, url, newurl))
-                    except Exception:
-                        pass
-        except Exception:
-            pass
-        time.sleep(20)
-
 
 def lan_beacon_loop():
     """持续往局域网广播自己的地址，手机 App 收到后自动把这里设为服务节点。"""
@@ -824,13 +641,7 @@ def lan_beacon_loop():
         return
     msg_base = 'HLJJS1|http://%s:%d|' % (_ip, PORT)
     name = LAN_BEACON_NAME or os.environ.get('COMPUTERNAME') or 'PC'
-    try:
-        _cfg = hub_cfg()
-        _bid = str(_cfg.get('id') or '')
-        _bfp = str(HUB_KEY.get('fp') or '')
-    except Exception:
-        _bid, _bfp = '', ''
-    msg = (msg_base + name + '|' + _bid + '|' + _bfp).encode('utf-8')
+    msg = (msg_base + name).encode('utf-8')
     so = _sock.socket(_sock.AF_INET, _sock.SOCK_DGRAM)
     try:
         so.setsockopt(_sock.SOL_SOCKET, _sock.SO_BROADCAST, 1)
@@ -893,7 +704,7 @@ def _new_code():
     with SIGNAL_LOCK:
         _gc()
         for _ in range(200):
-            c = "%06d" % random.randint(0, 999999)
+            c = "%04d" % random.randint(0, 9999)
             if c not in SIGNAL:
                 SIGNAL[c] = {"offer": None, "answer": None, "at": time.time()}
                 return c
@@ -945,7 +756,7 @@ def _proxy_inject(html, base):
               'parent.postMessage({type:"hljjs-proxy",url:abs},"*");}catch(err){}},true);'
               'var __m={};function __r(u,k){try{if(!u||__m[u])return;if(!/^https?:/i.test(u))return;__m[u]=1;'
               'parent.postMessage({type:"hljjs-media",url:u,kind:k||""},"*");}catch(e){}}'
-              'function __is(u){return /\\.(mp4|m4v|webm|mkv|mov|mp3|m4a|aac|ogg|wav|flac|m3u8|mpd|ts)(\\?|$)/i.test(u||"");}'
+              'function __is(u){return /\.(mp4|m4v|webm|mkv|mov|mp3|m4a|aac|ogg|wav|flac|m3u8|mpd|ts)(\?|$)/i.test(u||"");}'
               'try{var __f=window.fetch;if(__f){window.fetch=function(){try{var a=arguments[0];var u=typeof a==="string"?a:(a&&a.url);if(__is(u))__r(u,"fetch");}catch(e){}return __f.apply(this,arguments);};}}catch(e){}'
               'try{var __o=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){try{if(__is(u))__r(u,"xhr");}catch(e){}return __o.apply(this,arguments);};}catch(e){}'
               'function __scan(){try{document.querySelectorAll("video,audio,source").forEach(function(el){var u=el.currentSrc||el.src||el.getAttribute("src");if(__is(u))__r(u,el.tagName.toLowerCase());});'
@@ -989,14 +800,142 @@ ROOM_MAX_IDLE = 30 * 60         # 空社团 30 分钟回收
 ROOM_MAX_LIFE = 12 * 3600
 ROOM_MAX_FRAME = 4 * 1024 * 1024
 
-HUB_CFG_FILE = os.path.join(ROOT, 'hub-config.json')
+HUB_CFG_FILE = os.environ.get('HLJJS_HUB_CFG') or os.path.join(ROOT, 'hub-config.json')
 HUB_DATA_DIR = os.environ.get('HLJJS_HUB_DATA') or os.path.join(os.path.expanduser('~'), '.hljjs-hub')
+
+# ---------- 中枢身份（P-256，纯 Python，无第三方依赖） ----------
+try:
+    import hubid as _hubid
+    _HUBKEY = _hubid.HubKey.load_or_create(os.path.join(HUB_DATA_DIR, 'hubkey.json'))
+except Exception as _e:
+    _hubid = None
+    _HUBKEY = None
+    try:
+        print('hub identity unavailable:', _e)
+    except Exception:
+        pass
+
+
+def hub_identity():
+    """对外公布的中枢身份：hubPub(JWK) / hubFp / keyReady"""
+    if not _HUBKEY:
+        return {'keyReady': False, 'hubPub': None, 'hubFp': ''}
+    return {'keyReady': True, 'hubPub': _HUBKEY.pub_jwk(), 'hubFp': _HUBKEY.fp()}
+
+
+def hub_sign(msg):
+    try:
+        return _HUBKEY.sign_b64(msg) if _HUBKEY else ''
+    except Exception:
+        return ''
+
+
+def hub_verify(pub, msg, sig):
+    try:
+        return bool(_hubid and _hubid.verify(pub, msg, sig))
+    except Exception:
+        return False
+
+
+# ---------- 串联签名：link-req / link-ok ----------
+_LINK_NONCE = {}
+
+
+def _pub_fp(pub):
+    try:
+        canon = json.dumps({'kty': 'EC', 'crv': 'P-256', 'x': pub.get('x'), 'y': pub.get('y')},
+                           separators=(',', ':'), sort_keys=False)
+        return hashlib.sha256(canon.encode()).hexdigest()[:12]
+    except Exception:
+        return ''
+
+
+def hub_link_req_canon(rid, from_id, from_url, ts, nonce):
+    return 'link-req|%s|%s|%s|%d|%s' % (rid, from_id, from_url, int(ts), nonce)
+
+
+def hub_link_ok_canon(rid, peer_id, peer_url, key, ts, nonce):
+    return 'link-ok|%s|%s|%s|%s|%d|%s' % (rid, peer_id, peer_url, key, int(ts), nonce)
+
+
+def hub_link_signed_request(rid, from_id, from_url, from_name):
+    ts = int(time.time() * 1000)
+    nonce = os.urandom(8).hex()
+    payload = {'reqId': rid, 'fromId': from_id, 'fromUrl': from_url, 'fromName': from_name,
+               'fromPubUrl': hub_extra_public_url(),
+               'ts': ts, 'nonce': nonce,
+               'fromPub': (_HUBKEY.pub_jwk() if _HUBKEY else None),
+               'fromFp': (_HUBKEY.fp() if _HUBKEY else '')}
+    payload['sig'] = hub_sign(hub_link_req_canon(rid, from_id, from_url, ts, nonce))
+    return payload
+
+
+def hub_link_verify_request(body):
+    """返回 (ok, err, extra)。没有签名=旧中枢：允许，但 verified=False。"""
+    pub = body.get('fromPub') or None
+    sig = str(body.get('sig') or '')
+    if not pub or not sig:
+        return True, '', {'verified': False}
+    try:
+        ts = int(body.get('ts') or 0)
+        nonce = str(body.get('nonce') or '')[:32]
+        fp = str(body.get('fromFp') or '')
+        if not ts or not nonce or abs(time.time() * 1000 - ts) > 300000:
+            return False, '申请签名信息不完整或已过期', {}
+        canon = hub_link_req_canon(body.get('reqId'), body.get('fromId'), body.get('fromUrl'), ts, nonce)
+        if not hub_verify(pub, canon, sig):
+            return False, '对方中枢签名验证失败', {}
+        if _pub_fp(pub) != fp:
+            return False, '指纹和公钥对不上', {}
+        if _LINK_NONCE.get(nonce):
+            return False, '重复的申请', {}
+        _LINK_NONCE[nonce] = time.time()
+        if len(_LINK_NONCE) > 500:
+            for k in list(_LINK_NONCE.keys())[:200]:
+                _LINK_NONCE.pop(k, None)
+        return True, '', {'verified': True, 'pub': pub, 'fp': fp}
+    except Exception as e:
+        return False, '验签出错：' + str(e)[:60], {}
+
+
+def hub_link_signed_peer(rid, key):
+    own = hub_link_info()
+    ts = int(time.time() * 1000)
+    nonce = os.urandom(8).hex()
+    peer = {'id': own['id'], 'url': own['url'], 'name': own['name'],
+            'pubUrl': own.get('pubUrl') or '',
+            'pub': own.get('hubPub'), 'fp': own.get('hubFp') or '',
+            'ts': ts, 'nonce': nonce}
+    peer['sig'] = hub_sign(hub_link_ok_canon(rid, own['id'], own['url'], key, ts, nonce))
+    return peer
+
+
+def hub_link_verify_peer(rid, key, peer):
+    pub = (peer or {}).get('pub') or None
+    sig = str((peer or {}).get('sig') or '')
+    if not pub or not sig:
+        return {'verified': False}
+    try:
+        ts = int(peer.get('ts') or 0)
+        nonce = str(peer.get('nonce') or '')[:32]
+        if not ts or not nonce or abs(time.time() * 1000 - ts) > 300000:
+            return {'verified': False, 'error': '回执签名过期'}
+        canon = hub_link_ok_canon(rid, peer.get('id'), peer.get('url'), key, ts, nonce)
+        if not hub_verify(pub, canon, sig):
+            return {'verified': False, 'error': '对方回执签名验证失败'}
+        fp = _pub_fp(pub)
+        if peer.get('fp') and peer.get('fp') != fp:
+            return {'verified': False, 'error': '回执指纹和公钥对不上'}
+        return {'verified': True, 'fp': fp, 'pub': pub}
+    except Exception as e:
+        return {'verified': False, 'error': '回执验签出错' + str(e)[:40]}
+
 HUB_CONNS_FILE = os.path.join(HUB_DATA_DIR, 'conns.json')
 HUB_BANS_FILE = os.path.join(HUB_DATA_DIR, 'bans.json')
 HUB_LOCK = threading.Lock()
 HUB_CONN_LOCK = threading.Lock()
 HUB_STATE = {'open': True, 'door': True}
-HUB_CFG = {'id': '', 'name': '', 'maxRooms': 0, 'maxMembers': 0, 'maxPerRoom': 30, 'rate_limit': True, 'turn': [], 'autoLink': False}
+HUB_CFG = {'id': '', 'name': '', 'maxRooms': 0, 'maxMembers': 0, 'maxPerRoom': 30, 'rate_limit': True}
 HUB_PUBLIC_URL = os.environ.get('HLJJS_PUBLIC_URL', '').strip().rstrip('/')
 HUB_ADMIN_TOKEN = os.environ.get('HLJJS_ADMIN_TOKEN', '').strip()
 TUNNEL_MODE = (os.environ.get('HLJJS_TUNNEL') or '').strip().lower() in ('1', 'true', 'yes', 'on')
@@ -1034,116 +973,87 @@ MSG_MAX = 300
 MSG_MAX_LEN = 500
 MSG_RATE = {}
 HUB_PEER_FILE = os.path.join(HUB_DATA_DIR, 'links.json')
+
+# ---------- 离线暂存（只存端到端加密信封，中枢无法解密） ----------
+HUB_OFFLINE_FILE = os.path.join(HUB_DATA_DIR, 'offline.json')
+HUB_OFFLINE = {}
+HUB_OFFLINE_LOCK = threading.Lock()
+HUB_OFFLINE_STATE = {'loaded': False}
+HUB_OFFLINE_TTL = 3 * 24 * 3600
+HUB_OFFLINE_MAX_PER_TO = 200
+HUB_OFFLINE_MAX_LEN = 128 * 1024
+
+
+def hub_offline_load():
+    if HUB_OFFLINE_STATE.get('loaded'):
+        return
+    HUB_OFFLINE_STATE['loaded'] = True
+    rows = _hub_read_json(HUB_OFFLINE_FILE, [])
+    if not isinstance(rows, list):
+        rows = []
+    now = time.time()
+    with HUB_OFFLINE_LOCK:
+        HUB_OFFLINE.clear()
+        for r in rows:
+            try:
+                if now - float(r.get('at') or 0) <= float(r.get('ttl') or HUB_OFFLINE_TTL):
+                    HUB_OFFLINE.setdefault(str(r.get('to') or '')[:64], []).append(r)
+            except Exception:
+                pass
+
+
+def hub_offline_save():
+    try:
+        with HUB_OFFLINE_LOCK:
+            rows = [r for v in HUB_OFFLINE.values() for r in v][:4000]
+        _hub_write_json(HUB_OFFLINE_FILE, rows)
+    except Exception:
+        pass
+
+
+def hub_offline_post(to, frm, env, ttl=None):
+    hub_offline_load()
+    to = str(to or '')[:64]
+    frm = str(frm or '')[:64]
+    env = str(env or '')
+    if not to or not frm or not env or len(env) > HUB_OFFLINE_MAX_LEN:
+        return 0
+    now = time.time()
+    try:
+        ttl = int(ttl or HUB_OFFLINE_TTL)
+    except Exception:
+        ttl = HUB_OFFLINE_TTL
+    ttl = max(60, min(7 * 24 * 3600, ttl))
+    row = {'to': to, 'from': frm, 'env': env, 'at': now, 'ttl': ttl}
+    with HUB_OFFLINE_LOCK:
+        lst = HUB_OFFLINE.setdefault(to, [])
+        lst.append(row)
+        if len(lst) > HUB_OFFLINE_MAX_PER_TO:
+            del lst[:len(lst) - HUB_OFFLINE_MAX_PER_TO]
+        for k in list(HUB_OFFLINE.keys()):
+            HUB_OFFLINE[k] = [x for x in HUB_OFFLINE[k]
+                              if now - float(x.get('at') or 0) <= float(x.get('ttl') or HUB_OFFLINE_TTL)]
+            if not HUB_OFFLINE[k]:
+                HUB_OFFLINE.pop(k, None)
+    hub_offline_save()
+    return 1
+
+
+def hub_offline_poll(to):
+    hub_offline_load()
+    to = str(to or '')[:64]
+    now = time.time()
+    with HUB_OFFLINE_LOCK:
+        lst = HUB_OFFLINE.pop(to, []) or []
+        out = [x for x in lst if now - float(x.get('at') or 0) <= float(x.get('ttl') or HUB_OFFLINE_TTL)]
+    if out:
+        hub_offline_save()
+    return out
+
 HUB_PEER_LOCK = threading.Lock()
 HUB_PEERS = {}
 HUB_LINK_REQS = {}
 HUB_LINK_OUT = {}
-
-# ---------- 中枢身份（ECDSA P-256） ----------
-HUB_KEY_FILE = os.path.join(HUB_DATA_DIR, 'hubkey.json')
-HUB_KEY = {'priv': None, 'pub': None, 'fp': '', 'ready': False}
-HUB_KEY_LOCK = threading.Lock()
-LINK_TS_SKEW = 300
-HUB_NONCE_LOCK = threading.Lock()
-HUB_NONCES = {}
-
-
-def _b64u(raw):
-    return base64.urlsafe_b64encode(bytes(raw)).decode('ascii').rstrip('=')
-
-
-def _unb64u(s):
-    s = str(s or '')
-    return base64.urlsafe_b64decode(s + '=' * (-len(s) % 4))
-
-
-def hub_fp_of(pub):
-    """和前端一致：SHA-256(JSON.stringify(pubJWK)) 前 12 位。"""
-    try:
-        raw = json.dumps(pub, separators=(',', ':'), ensure_ascii=False).encode('utf-8')
-        return hashlib.sha256(raw).hexdigest()[:12]
-    except Exception:
-        return ''
-
-
-def hub_key_load():
-    """加载/生成中枢自己的 P-256 身份密钥（存在 ~/.hljjs-hub/hubkey.json）。"""
-    if not _CRYPTO:
-        return
-    with HUB_KEY_LOCK:
-        if HUB_KEY.get('ready'):
-            return
-        try:
-            os.makedirs(HUB_DATA_DIR, exist_ok=True)
-            priv = None
-            if os.path.isfile(HUB_KEY_FILE):
-                with open(HUB_KEY_FILE, 'rb') as f:
-                    priv = _ser.load_pem_private_key(f.read(), password=None)
-            if priv is None:
-                priv = _ec.generate_private_key(_ec.SECP256R1())
-                pem = priv.private_bytes(_ser.Encoding.PEM, _ser.PrivateFormat.PKCS8,
-                                         _ser.NoEncryption())
-                tmp = HUB_KEY_FILE + '.tmp'
-                with open(tmp, 'wb') as f:
-                    f.write(pem)
-                os.replace(tmp, HUB_KEY_FILE)
-            nums = priv.public_key().public_numbers()
-            pub = {'kty': 'EC', 'crv': 'P-256',
-                   'x': _b64u(nums.x.to_bytes(32, 'big')),
-                   'y': _b64u(nums.y.to_bytes(32, 'big'))}
-            HUB_KEY.update({'priv': priv, 'pub': pub, 'fp': hub_fp_of(pub), 'ready': True})
-            print('  [中枢] 身份指纹 ' + HUB_KEY['fp'])
-        except Exception as e:
-            print('  [中枢] 身份密钥加载失败（串联将不验签）：%s' % e)
-
-
-def hub_sign(text):
-    if not _CRYPTO or not HUB_KEY.get('priv'):
-        return ''
-    try:
-        der = HUB_KEY['priv'].sign(str(text).encode('utf-8'), _ec.ECDSA(_hashes.SHA256()))
-        r, s = _der_split(der)
-        return (r.to_bytes(32, 'big') + s.to_bytes(32, 'big')).hex()
-    except Exception:
-        return ''
-
-
-def hub_verify(pub, text, sig_hex):
-    try:
-        if not _CRYPTO or not isinstance(pub, dict):
-            return False
-        x = int.from_bytes(_unb64u(pub.get('x')), 'big')
-        y = int.from_bytes(_unb64u(pub.get('y')), 'big')
-        pk = _ec.EllipticCurvePublicNumbers(x, y, _ec.SECP256R1()).public_key()
-        raw = bytes.fromhex(str(sig_hex or ''))
-        if len(raw) != 64:
-            return False
-        der = _der_join(int.from_bytes(raw[:32], 'big'), int.from_bytes(raw[32:], 'big'))
-        pk.verify(der, str(text).encode('utf-8'), _ec.ECDSA(_hashes.SHA256()))
-        return True
-    except Exception:
-        return False
-
-
-def hub_link_fresh(ts):
-    try:
-        return abs(time.time() - float(ts)) <= LINK_TS_SKEW
-    except Exception:
-        return False
-
-
-def hub_link_nonce_ok(key):
-    key = str(key or '')[:80]
-    if not key:
-        return False
-    now = time.time()
-    with HUB_NONCE_LOCK:
-        for k in [k for k, v in list(HUB_NONCES.items()) if now - v > 600]:
-            HUB_NONCES.pop(k, None)
-        if key in HUB_NONCES:
-            return False
-        HUB_NONCES[key] = now
-        return True
 
 
 def _hub_data_ensure():
@@ -1260,22 +1170,6 @@ def hub_cfg_load():
         if not HUB_CFG.get('id'):
             HUB_CFG['id'] = hashlib.sha1(os.urandom(16)).hexdigest()[:12]
             _hub_write_json(HUB_CFG_FILE, dict(HUB_CFG))
-        # 通话中继：hub-config.json 里配一次，所有客户端 /__info 自动拿到
-        _turn = j.get('turn')
-        _turn_list = []
-        if isinstance(_turn, list):
-            for _t in _turn[:4]:
-                if not isinstance(_t, dict):
-                    continue
-                _u = str(_t.get('urls') or _t.get('url') or '').strip()
-                if not _u.lower().startswith(('turn:', 'turns:')):
-                    continue
-                _turn_list.append({
-                    'urls': _u,
-                    'username': str(_t.get('username') or ''),
-                    'credential': str(_t.get('credential') or _t.get('password') or ''),
-                })
-        HUB_CFG['turn'] = _turn_list
     rows = _hub_read_json(HUB_CONNS_FILE, [])
     if isinstance(rows, dict):
         rows = list(rows.values())
@@ -1313,9 +1207,7 @@ def hub_cfg_load():
                 'name': str(p.get('name') or '')[:24],
                 'key': str(p.get('key') or '')[:32],
                 'since': float(p.get('since') or 0),
-                'pub': p.get('pub') if isinstance(p.get('pub'), dict) else None,
-                'fp': str(p.get('fp') or '')[:24],
-                'verified': bool(p.get('verified')),
+                'pubUrl': str(p.get('pubUrl') or '')[:300],
             }
 
 
@@ -1501,6 +1393,18 @@ def hub_public_url():
     return 'http://%s:%d' % (lan_ip(), PORT)
 
 
+def hub_extra_public_url():
+    """本机的公网入口：手动指定的 HLJJS_PUBLIC_URL 或正在跑的云隧道地址。"""
+    for u in ((HUB_PUBLIC_URL if 'HUB_PUBLIC_URL' in globals() else ''), PUBLIC_URL):
+        try:
+            u = str(u or '').strip().rstrip('/')
+        except Exception:
+            u = ''
+        if u.startswith('http://') or u.startswith('https://'):
+            return u
+    return ''
+
+
 def hub_admin_ok(h):
     try:
         if h._loopback():
@@ -1542,135 +1446,11 @@ def hub_link_info():
     with ROOM_LOCK:
         members = sum(len(r['members']) for r in ROOMS.values())
     online = sum(1 for r in hub_conns_merged() if r.get('online'))
-    return {'id': cfg.get('id') or '', 'name': cfg.get('name') or '',
-            'url': hub_public_url(), 'open': hub_open(),
-            'door': hub_door_open(), 'members': members, 'online': online,
-            'pub': HUB_KEY.get('pub'), 'fp': HUB_KEY.get('fp'),
-            'keyReady': bool(HUB_KEY.get('ready'))}
-
-
-def _is_lan_ip(ip):
-    """内网/本机地址判断（含 IPv6 映射、ULA、链路本地）"""
-    ip = str(ip or '').strip().replace('::ffff:', '')
-    if not ip:
-        return False
-    if ip in ('::1', 'localhost'):
-        return True
-    low = ip.lower()
-    if low.startswith('fc') or low.startswith('fd') or low.startswith('fe80'):
-        return True
-    try:
-        parts = [int(x) for x in ip.split('.')]
-    except Exception:
-        return False
-    if len(parts) != 4:
-        return False
-    a, b = parts[0], parts[1]
-    return (a == 127 or a == 10 or (a == 192 and b == 168) or (a == 172 and 16 <= b <= 31)
-            or (a == 169 and b == 254))
-
-
-def hub_link_do_approve(rid, accept):
-    """审批串联（供界面和「局域网自动串联」共用）"""
-    rid = str(rid or '')[:32]
-    with HUB_PEER_LOCK:
-        req = HUB_LINK_REQS.get(rid)
-        if not req or req.get('status') != 'pending':
-            return {'ok': False, 'error': '申请不存在或已处理'}
-        req['status'] = 'approved' if accept else 'rejected'
-        req['key'] = hashlib.sha1(os.urandom(16)).hexdigest()[:16] if accept else ''
-        req = dict(req)
-    if not accept:
-        try:
-            hub_http_json(req['fromUrl'] + '/__hub/link/reject', {'reqId': rid})
-        except Exception:
-            pass
-        return {'ok': True, 'accepted': False}
-    key = req['key']
-    hub_peer_add(req['fromId'], req['fromUrl'], req['fromName'], key,
-                 req.get('fromPub'), req.get('fp'), req.get('verified'))
-    own = hub_link_info()
-    ts = int(time.time())
-    nonce = hashlib.sha1(os.urandom(12)).hexdigest()[:24]
-    peer_obj = {'id': own['id'], 'url': own['url'], 'name': own['name'],
-                'pub': own.get('pub'), 'fp': own.get('fp')}
-    sig = ''
-    if own.get('pub'):
-        sig = hub_sign('link-ok|' + rid + '|' + str(peer_obj['id']) + '|' +
-                       str(peer_obj['url']) + '|' + key + '|' + str(ts) + '|' + nonce)
-    cb = False
-    try:
-        r = hub_http_json(req['fromUrl'] + '/__hub/link/accept',
-                          {'reqId': rid, 'key': key, 'peer': peer_obj,
-                           'ts': ts, 'nonce': nonce, 'sig': sig})
-        cb = bool(r.get('ok'))
-    except Exception:
-        pass
-    return {'ok': True, 'accepted': True, 'callback': cb}
-
-
-def hub_link_send_request(url, name=''):
-    """本中枢向对方中枢发起串联申请（带签名）。"""
-    url = str(url or '').strip().rstrip('/')[:300]
-    if not (url.startswith('http://') or url.startswith('https://')):
-        return {'ok': False, 'error': '地址要 http:// 或 https://'}
-    own = hub_link_info()
-    rid = hashlib.sha1(os.urandom(16)).hexdigest()[:16]
-    ts = int(time.time())
-    nonce = hashlib.sha1(os.urandom(12)).hexdigest()[:24]
-    payload = {'reqId': rid, 'fromId': own['id'], 'fromUrl': own['url'],
-               'fromName': own['name'], 'ts': ts, 'nonce': nonce}
-    if own.get('pub'):
-        payload.update({'fromPub': own['pub'], 'fromFp': own.get('fp'),
-                        'sig': hub_sign('link-req|' + rid + '|' + str(own['id']) + '|' +
-                                        str(own['url']) + '|' + str(ts) + '|' + nonce)})
-    try:
-        r = hub_http_json(url + '/__hub/link/request', payload)
-    except Exception as e:
-        return {'ok': False, 'error': '连不上对方中枢：' + str(e)[:80], 'net': True}
-    if not r.get('ok'):
-        return {'ok': False, 'error': r.get('error') or '对方拒绝了申请'}
-    with HUB_PEER_LOCK:
-        HUB_LINK_OUT[rid] = {'reqId': rid, 'url': url, 'name': str(name or url)[:24],
-                             'at': time.time(), 'status': 'pending'}
-    return {'ok': True, 'reqId': rid}
-
-
-def hub_autolink_loop():
-    """局域网自动串联：同网中枢双方都开了 autoLink，就自动建链（默认关）。"""
-    time.sleep(12)
-    while True:
-        try:
-            if hub_cfg().get('autoLink'):
-                own_id = str(hub_cfg().get('id') or '')
-                with HUB_PEER_LOCK:
-                    known = set(HUB_PEERS.keys())
-                    pending = set(str(v.get('url') or '').rstrip('/') for v in HUB_LINK_OUT.values())
-                with SIGNAL_LOCK:
-                    cand = [dict(v) for v in LAN_HUBS.values()]
-                now5 = time.time()
-                for h in cand:
-                    pid = str(h.get('id') or '')
-                    url = str(h.get('url') or '').rstrip('/')
-                    if not pid or not url or pid == own_id or pid in known or url in pending:
-                        continue
-                    if now5 - float(h.get('at') or 0) > 60:
-                        continue
-                    try:
-                        info = hub_http_json(url + '/__info', timeout=3)
-                    except Exception:
-                        continue
-                    if not (info.get('cfg') or {}).get('autoLink'):
-                        continue
-                    r = hub_link_send_request(url, h.get('name') or '')
-                    try:
-                        print('[hub] 自动串联 %s -> %s : %s' % (h.get('name') or pid, url,
-                              'ok' if r.get('ok') else str(r.get('error'))))
-                    except Exception:
-                        pass
-        except Exception:
-            pass
-        time.sleep(20)
+    out = {'id': cfg.get('id') or '', 'name': cfg.get('name') or '',
+           'url': hub_public_url(), 'pubUrl': hub_extra_public_url(), 'open': hub_open(),
+           'door': hub_door_open(), 'members': members, 'online': online}
+    out.update(hub_identity())
+    return out
 
 
 def hub_http_json(url, payload=None, timeout=5):
@@ -1686,20 +1466,23 @@ def hub_http_json(url, payload=None, timeout=5):
         return json.loads(r.read().decode('utf-8'))
 
 
-def hub_peer_add(pid, url, name, key, pub=None, fp='', verified=False):
+def hub_peer_add(pid, url, name, key, verified=False, fp='', pub=None, error='', pubUrl=''):
     pid = str(pid or '')[:64]
     url = str(url or '').strip().rstrip('/')[:300]
     if not pid or not (url.startswith('http://') or url.startswith('https://')):
         return False
     with HUB_PEER_LOCK:
         old = HUB_PEERS.get(pid) or {}
-        # TOFU：同一条串联的公钥变了 → 不静默覆盖，留给前端提示
-        if old.get('pub') and pub and hub_fp_of(old['pub']) != hub_fp_of(pub):
-            print('  [中枢] 警告：%s 的公钥变了（%s → %s）' % (url, old.get('fp') or '?', fp or '?'))
+        if old.get('fp') and fp and old.get('fp') != fp:
+            try:
+                print('hub peer key changed:', pid, old.get('fp'), '->', fp)
+            except Exception:
+                pass
         HUB_PEERS[pid] = {'id': pid, 'url': url, 'name': str(name or '')[:24],
-                          'key': str(key or '')[:32], 'since': time.time(),
-                          'pub': pub if isinstance(pub, dict) else None,
-                          'fp': str(fp or '')[:24], 'verified': bool(verified)}
+                          'key': str(key or '')[:32], 'since': old.get('since') or time.time(),
+                          'pubUrl': str(pubUrl or old.get('pubUrl') or '')[:300],
+                          'verified': bool(verified), 'fp': str(fp or old.get('fp') or '')[:16],
+                          'pub': pub or old.get('pub'), 'verifyError': str(error or '')[:80]}
     hub_peers_save()
     return True
 
@@ -1724,10 +1507,211 @@ def hub_peers_save():
 
 
 hub_cfg_load()
-try:
-    hub_key_load()
-except Exception:
-    pass
+
+# ---------------- 中枢间转发（消息级联邦） ----------------
+FED_LOCK = threading.Lock()
+FED_ACTIVE = {}          # pair -> 时间戳（正=桥已建立，负=正在发起）
+
+
+def hub_peers_all():
+    with HUB_PEER_LOCK:
+        return [dict(v) for v in HUB_PEERS.values()]
+
+
+def relay_waiting(pair, exclude=None):
+    """本机这个 pair 上正在等的客户端（不含跨中枢桥的虚拟连接）。"""
+    with RELAY_LOCK:
+        slot = RELAY.get(pair) or {}
+        for k, v in slot.items():
+            if getattr(v, 'virtual', False):
+                continue
+            if exclude is not None and v is exclude:
+                continue
+            return v
+    return None
+
+
+def hub_relay_canon(kind, pair, fromid, ts, cmid=''):
+    return '%s|%s|%s|%s|%s' % (kind, pair, fromid, ts, cmid)
+
+
+def hub_relay_sig(key, canon):
+    return hmac.new(str(key or '').encode('utf-8'), canon.encode('utf-8'),
+                    hashlib.sha256).hexdigest()[:32]
+
+
+def hub_peer_urls(peer):
+    """这个中枢可以尝试的地址：先用串联时记的地址，再退回它的公网入口。"""
+    out = []
+    for k in ('url', 'pubUrl'):
+        u = str((peer or {}).get(k) or '').strip().rstrip('/')
+        if (u.startswith('http://') or u.startswith('https://')) and u not in out:
+            out.append(u)
+    return out
+
+
+def hub_peer_by_id(pid):
+    for p in hub_peers_all():
+        if str(p.get('id') or '') == str(pid or ''):
+            return p
+    return None
+
+
+class FedConn:
+    """跨中枢桥的虚拟对端：send() 把帧写到另一个中枢的 WS 上。"""
+    def __init__(self, pair, mid, sock):
+        self.code = pair
+        self.id = mid
+        self.name = ''
+        self.sock = sock
+        self.alive = True
+        self.lock = threading.Lock()
+        self.virtual = True
+        self.rx = time.time()
+
+    def send(self, opcode, data):
+        if not self.alive:
+            return False
+        try:
+            with self.lock:
+                self.sock.sendall(_ws_pack_client(opcode, data))
+            return True
+        except Exception:
+            self.alive = False
+            return False
+
+    def send_json(self, obj):
+        return self.send(0x1, json.dumps(obj, ensure_ascii=False).encode('utf-8'))
+
+
+def _fed_bridge(pair, conn, peer, remote_mid, cname, bases=None):
+    """本机客户端 conn ↔ peer 中枢上的 remote_mid：连过去并双向转发。
+
+    attach 的 cmid 必须是**本机这个客户端的 id**（对方中枢要拿它当虚拟对端登记）；
+    如果传对方那个客户端的 id，虚拟连接会和它在同一个 pair 里撞 id，帧就转不动了。
+    """
+    from urllib.parse import quote
+    try:
+        me = str(hub_link_info().get('id') or '')
+        ts = int(time.time())
+        canon = hub_relay_canon('relay-attach', pair, me, ts, conn.id)
+        qs = ('/__hub/relay/attach?pair=%s&from=%s&cmid=%s&cname=%s&ts=%s&sig=%s' % (
+            quote(pair), quote(me), quote(conn.id), quote(conn.name or ''), ts,
+            hub_relay_sig(peer.get('key'), canon)))
+        sock = None
+        rf = None
+        for base in (bases or hub_peer_urls(peer)):
+            try:
+                sock, rf = ws_client_open(base, qs)
+                break
+            except Exception:
+                sock = None
+                continue
+        if sock is None:
+            raise IOError('所有地址都连不上')
+    except Exception as e:
+        try:
+            print('fed bridge failed:', e)
+        except Exception:
+            pass
+        return False
+    fed = FedConn(pair, 'fed|' + str(peer.get('id') or ''), sock)
+    with RELAY_LOCK:
+        RELAY.setdefault(pair, {})[fed.id] = fed
+    with FED_LOCK:
+        FED_ACTIVE[pair] = time.time()
+    try:
+        conn.send_json({'t': 'relay-peer', 'id': remote_mid, 'name': cname or ''})
+    except Exception:
+        pass
+    try:
+        while conn.alive and fed.alive:
+            op, data = _ws_recv(rf)
+            if op == 0x8:
+                break
+            if op == 0x9:
+                fed.send(0xA, data)
+                continue
+            if op in (0x1, 0x2):
+                conn.send(op, data)
+    except Exception:
+        pass
+    finally:
+        fed.alive = False
+        try:
+            sock.close()
+        except Exception:
+            pass
+        with RELAY_LOCK:
+            slot = RELAY.get(pair) or {}
+            if slot.get(fed.id) is fed:
+                slot.pop(fed.id, None)
+        with FED_LOCK:
+            if FED_ACTIVE.get(pair):
+                FED_ACTIVE.pop(pair, None)
+        try:
+            conn.send_json({'t': 'relay-peer-off', 'id': remote_mid})
+        except Exception:
+            pass
+    return True
+
+
+def _fed_try(pair, conn):
+    """本机这个 pair 只有自己：问串联中枢那边有没有人在等，有就连过去桥起来。"""
+    try:
+        me = str(hub_link_info().get('id') or '')
+        if not me or not hub_peers_all():
+            return False
+        with FED_LOCK:
+            if FED_ACTIVE.get(pair):
+                return False
+            FED_ACTIVE[pair] = -time.time()
+
+        def worker():
+            try:
+                for _ in range(10):
+                    time.sleep(1.2)
+                    if not conn.alive:
+                        return
+                    if relay_waiting(pair, conn) is not None:
+                        return
+                    for peer in hub_peers_all():
+                        if not peer.get('url') or not peer.get('key'):
+                            continue
+                        # 只让 id 小的一侧发起：两边都发起会建两条桥、消息重复
+                        if me > str(peer.get('id') or ''):
+                            continue
+                        ts = int(time.time())
+                        canon = hub_relay_canon('relay-find', pair, me, ts)
+                        bases = hub_peer_urls(peer)
+                        r = None
+                        for base in bases:
+                            try:
+                                r = hub_http_json(base + '/__hub/relay/find',
+                                                  {'pair': pair, 'from': me, 'ts': ts,
+                                                   'sig': hub_relay_sig(peer.get('key'), canon)},
+                                                  timeout=3)
+                                break
+                            except Exception:
+                                continue
+                        if not r or not r.get('waiting') or not r.get('mid'):
+                            continue
+                        if _fed_bridge(pair, conn, peer, str(r['mid']), str(r.get('name') or ''),
+                                       bases=bases):
+                            return
+            finally:
+                with FED_LOCK:
+                    if (FED_ACTIVE.get(pair) or 0) < 0:
+                        FED_ACTIVE.pop(pair, None)
+        try:
+            threading.Thread(target=worker, daemon=True).start()
+        except Exception:
+            pass
+        return True
+    except Exception:
+        return False
+
+
 ROOM_SOCK_TIMEOUT = 90          # 客户端每 30 秒 ping 一次；90 秒没动静就认为掉线
 
 _WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
@@ -1792,31 +1776,62 @@ def _ws_recv(rf):
             return (op0 or 0x1, msg)
 
 
-class VoiceConn:
-    """一条语音中继连接（只转发小帧，不做缓冲）"""
-    def __init__(self, handler, call, cid, name):
-        self.h = handler
-        self.call = call
-        self.id = cid
-        self.name = name
-        self.lock = threading.Lock()
-        self.alive = True
-        self.rx = 0
-
-    def send(self, opcode, data):
-        if not self.alive:
-            return False
-        try:
-            with self.lock:
-                self.h.wfile.write(_ws_pack(opcode, data))
-            return True
-        except Exception:
-            self.alive = False
-            return False
+def _ws_pack_client(opcode, data):
+    """客户端→服务端的帧必须带掩码（RFC 6455）。"""
+    n = len(data)
+    mask = os.urandom(4)
+    if n < 126:
+        head = bytes([0x80 | opcode, 0x80 | n])
+    elif n < 65536:
+        head = bytes([0x80 | opcode, 0x80 | 126]) + n.to_bytes(2, 'big')
+    else:
+        head = bytes([0x80 | opcode, 0x80 | 127]) + n.to_bytes(8, 'big')
+    return head + mask + bytes(c ^ mask[i & 3] for i, c in enumerate(data))
 
 
-VOICE_LOCK = threading.RLock()
-VOICE_ROOMS = {}
+class _PreBuf:
+    """把握手时多读出来的字节接回去，给 _ws_recv 当文件用。"""
+    def __init__(self, rf, pre=b''):
+        self.rf = rf
+        self.pre = pre
+
+    def read(self, n):
+        if self.pre:
+            out, self.pre = self.pre[:n], self.pre[n:]
+            if len(out) == n:
+                return out
+            rest = self.rf.read(n - len(out))
+            return out + (rest or b'')
+        return self.rf.read(n)
+
+
+def ws_client_open(base, path_qs, timeout=6):
+    """当 WebSocket 客户端去连另一个中枢（中枢间转发用）。返回 (sock, 读文件)。"""
+    from urllib.parse import urlparse
+    u = urlparse(base)
+    host = u.hostname or ''
+    port = u.port or (443 if u.scheme == 'https' else 80)
+    sock = socket.create_connection((host, port), timeout=timeout)
+    if u.scheme == 'https':
+        import ssl
+        sock = ssl.create_default_context().wrap_socket(sock, server_hostname=host)
+    key = base64.b64encode(os.urandom(16)).decode('ascii')
+    req = ('GET %s HTTP/1.1\r\nHost: %s:%d\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n'
+           'Sec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n\r\n') % (path_qs, host, port, key)
+    sock.sendall(req.encode('ascii'))
+    raw = sock.makefile('rb')
+    head = b''
+    while b'\r\n\r\n' not in head:
+        ch = raw.read(1)
+        if not ch:
+            raise IOError('ws handshake closed')
+        head += ch
+        if len(head) > 16384:
+            raise IOError('ws handshake too big')
+    if b'101' not in head.split(b'\r\n')[0]:
+        raise IOError('ws upgrade rejected')
+    rest = head.split(b'\r\n\r\n', 1)[1]
+    return sock, _PreBuf(raw, rest)
 
 
 class RoomConn:
@@ -1953,6 +1968,7 @@ def _room_roster_msg(room):
             'muted': bool(m.muted), 'vice': bool(m.vice), 'admin': bool(m.admin or (room.get('admin_id') and m.id == room.get('admin_id'))),
             'bytes': int(m.bytes),
             'inRoom': bool(getattr(m, 'in_room', False)),
+            'ip': _member_ip(m),
         })
     return {
         't': 'ws-roster',
@@ -2212,36 +2228,6 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.send_header('Access-Control-Allow-Headers', 'content-type, x-hub-admin')
         self.send_header('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
         self.send_header('Cache-Control', 'no-store')
-
-    PUBLIC_ALLOW = ('/__info', '/__room/', '/__signal/', '/__voice')
-
-    def _req_ip(self):
-        """真实来源：cloudflared 从 127.0.0.1 连进来，用转发头还原；直连则用 socket 地址。"""
-        try:
-            sock_ip = str(self.client_address[0] or '')
-        except Exception:
-            sock_ip = ''
-        fwd = ''
-        try:
-            fwd = (self.headers.get('CF-Connecting-IP') or self.headers.get('X-Forwarded-For')
-                   or self.headers.get('X-Real-IP') or '').split(',')[0].strip()
-        except Exception:
-            fwd = ''
-        if fwd and sock_ip in ('127.0.0.1', '::1', '', '::ffff:127.0.0.1'):
-            return fwd
-        return sock_ip
-
-    def _public_denied(self, path):
-        """公网来的请求只放行最小接口；本机/局域网不受影响。"""
-        if not _guard_is_public(self._req_ip()):
-            return False
-        for p in self.PUBLIC_ALLOW:
-            if path == p or path.startswith(p):
-                return False
-        return True
-
-    def version_string(self):
-        return 'hljjs'
 
     def _loopback(self):
         """USB 反向 / 本机页面 = 127.0.0.1；反向代理和同一 Wi-Fi 的其他人不是。"""
@@ -2636,75 +2622,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                            'devices': len(hub_device_rows(rows)),
                            'clients': sum(1 for r in rows if r.get('client')),
                            'rate_limit': bool(cfg.get('rate_limit', True)),
-                           'lan': hub_public_url(), 'port': PORT, 'cfg': cfg,
-                           'hubFp': HUB_KEY.get('fp') or '',
-                           'keyReady': bool(HUB_KEY.get('ready'))})
-
-    def _store_put(self):
-        if not hub_admin_ok(self):
-            return self._json({'ok': False, 'error': '只有本机/管理员能写磁盘备份'}, 403)
-        # _query() 只做字符串切分、不解码，这里自己 unquote
-        dst = _store_path(urllib.parse.unquote(self._query().get('name') or ''))
-        if not dst:
-            return self._json({'ok': False, 'error': '文件名不合法'}, 400)
-        try:
-            n = int(self.headers.get('Content-Length') or 0)
-        except Exception:
-            n = 0
-        if n <= 0:
-            return self._json({'ok': False, 'error': '没有内容'}, 400)
-        if n > STORE_MAX:
-            return self._json({'ok': False, 'error': '太大了（上限 %d MB）' % (STORE_MAX // 1048576)}, 413)
-        try:
-            os.makedirs(STORE_DIR, exist_ok=True)
-        except Exception as e:
-            return self._json({'ok': False, 'error': '建目录失败：%s' % e}, 500)
-        got = 0
-        try:
-            with open(dst, 'wb') as f:
-                while got < n:
-                    chunk = self.rfile.read(min(262144, n - got))
-                    if not chunk:
-                        break
-                    f.write(chunk)
-                    got += len(chunk)
-        except Exception as e:
-            try:
-                os.remove(dst)
-            except Exception:
-                pass
-            return self._json({'ok': False, 'error': '写入失败：%s' % e}, 500)
-        if got != n:
-            try:
-                os.remove(dst)
-            except Exception:
-                pass
-            return self._json({'ok': False, 'error': '传输不完整'}, 400)
-        _usage_add('in', got)
-        return self._json({'ok': True, 'name': os.path.basename(dst), 'size': got})
-
-    def _store_get(self):
-        if not hub_admin_ok(self):
-            return self._json({'ok': False, 'error': '只有本机能取磁盘备份'}, 403)
-        p = _store_path(urllib.parse.unquote(self._query().get('name') or ''))
-        if not p or not os.path.isfile(p):
-            return self._json({'ok': False, 'error': '没有这份备份'}, 404)
-        try:
-            size = os.path.getsize(p)
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/octet-stream')
-            self.send_header('Content-Length', str(size))
-            self._cors()
-            self.end_headers()
-            with open(p, 'rb') as f:
-                while True:
-                    chunk = f.read(262144)
-                    if not chunk:
-                        break
-                    self.wfile.write(chunk)
-            _usage_add('out', size)
-        except Exception:
-            pass
+                           'lan': hub_public_url(), 'port': PORT, 'cfg': cfg})
 
     def _hub_public(self, action):
         if action == 'state':
@@ -2775,8 +2693,6 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         cfg['maxRooms'] = _int('maxRooms', 0, 5000, cfg.get('maxRooms', 0))
         cfg['maxMembers'] = _int('maxMembers', 0, 100000, cfg.get('maxMembers', 0))
         cfg['maxPerRoom'] = _int('maxPerRoom', 2, 30, cfg.get('maxPerRoom', 30))
-        if body.get('autoLink') is not None:
-            cfg['autoLink'] = bool(body.get('autoLink'))
         hub_cfg_save(cfg)
         return self._json({'ok': True, 'cfg': cfg})
 
@@ -2865,40 +2781,18 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self._json({'ok': False, 'error': '参数不对'}, 400)
         if fid == (hub_cfg().get('id') or ''):
             return self._json({'ok': False, 'error': '不能串联自己'}, 400)
-        # 身份验签（新版中枢必带；旧版没有 pub 就标记未验签）
-        pub = body.get('fromPub') if isinstance(body.get('fromPub'), dict) else None
-        fp, verified = '', False
-        if pub:
-            fp = hub_fp_of(pub)
-            claimed = str(body.get('fromFp') or '')[:24]
-            if claimed and claimed != fp:
-                return self._json({'ok': False, 'error': '指纹和公钥对不上'}, 400)
-            ts = int(body.get('ts') or 0)
-            nonce = str(body.get('nonce') or '')[:64]
-            if not hub_link_fresh(ts):
-                return self._json({'ok': False, 'error': '申请已过期（检查两台电脑的时间）'}, 400)
-            if not hub_link_nonce_ok(rid + '|' + nonce):
-                return self._json({'ok': False, 'error': '重复的申请'}, 400)
-            canon = 'link-req|' + rid + '|' + fid + '|' + url + '|' + str(ts) + '|' + nonce
-            if not hub_verify(pub, canon, str(body.get('sig') or '')):
-                return self._json({'ok': False, 'error': '对方中枢签名验证失败'}, 400)
-            verified = True
+        ok, err, extra = hub_link_verify_request(body)
+        if not ok:
+            return self._json({'ok': False, 'error': err}, 400)
         with HUB_PEER_LOCK:
             HUB_LINK_REQS[rid] = {'reqId': rid, 'fromId': fid, 'fromUrl': url,
+                                  'fromPubUrl': str(body.get('fromPubUrl') or '').strip().rstrip('/')[:300],
                                   'fromName': name or url, 'at': time.time(), 'status': 'pending',
-                                  'fromPub': pub, 'fp': fp, 'verified': verified}
+                                  'verified': bool(extra.get('verified')), 'fp': extra.get('fp') or '',
+                                  'pub': extra.get('pub')}
             if len(HUB_LINK_REQS) > 300:
                 for k in list(HUB_LINK_REQS.keys())[:100]:
                     HUB_LINK_REQS.pop(k, None)
-        # 局域网自动串联：本中枢开了 autoLink，且申请来自内网地址 → 直接同意
-        try:
-            _al = bool(hub_cfg().get('autoLink'))
-            _ip = (self.client_address[0] if self.client_address else '').replace('::ffff:', '')
-            if _al and _is_lan_ip(_ip):
-                _r = hub_link_do_approve(rid, True)
-                print('[hub] 自动串联同意 %s (%s) -> %s' % (rid, _ip, _r))
-        except Exception as _e:
-            print('[hub] 自动串联失败 %s: %s' % (rid, _e))
         return self._json({'ok': True})
 
     def _hub_link_pending(self):
@@ -2915,40 +2809,58 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         body = self._body() or {}
         rid = str(body.get('reqId') or '')[:32]
         accept = bool(body.get('accept'))
-        return self._json(hub_link_do_approve(rid, accept))
+        with HUB_PEER_LOCK:
+            req = HUB_LINK_REQS.get(rid)
+            if not req or req.get('status') != 'pending':
+                return self._json({'ok': False, 'error': '申请不存在或已处理'}, 404)
+            req['status'] = 'approved' if accept else 'rejected'
+            req['key'] = hashlib.sha1(os.urandom(16)).hexdigest()[:16] if accept else ''
+        if not accept:
+            try:
+                hub_http_json(req['fromUrl'] + '/__hub/link/reject', {'reqId': rid})
+            except Exception:
+                pass
+            return self._json({'ok': True, 'accepted': False})
+        key = req['key']
+        hub_peer_add(req['fromId'], req['fromUrl'], req['fromName'], key,
+                     verified=bool(req.get('verified')), fp=req.get('fp') or '', pub=req.get('pub'),
+                     pubUrl=req.get('fromPubUrl') or '')
+        own = hub_link_info()
+        cb = False
+        # 对方可能只有公网地址可达：LAN 地址回调失败就换它的公网入口再试一次
+        _bases = []
+        for _u in (req.get('fromUrl'), req.get('fromPubUrl')):
+            _u = str(_u or '').strip().rstrip('/')
+            if _u and _u not in _bases:
+                _bases.append(_u)
+        for _base in _bases:
+            try:
+                r = hub_http_json(_base + '/__hub/link/accept',
+                                  {'reqId': rid, 'key': key,
+                                   'peer': hub_link_signed_peer(rid, key)})
+                cb = bool(r.get('ok'))
+                if cb:
+                    break
+            except Exception:
+                continue
+        return self._json({'ok': True, 'accepted': True, 'callback': cb})
 
     def _hub_link_accept(self):
         body = self._body() or {}
         rid = str(body.get('reqId') or '')[:32]
         key = str(body.get('key') or '')[:32]
         peer = body.get('peer') or {}
-        pid = str(peer.get('id') or '')[:64]
-        purl = str(peer.get('url') or '').strip().rstrip('/')[:300]
         with HUB_PEER_LOCK:
             out = HUB_LINK_OUT.get(rid)
             if not out or out.get('status') != 'pending':
                 return self._json({'ok': False, 'error': '没有这个待确认的申请'}, 404)
-        pub = peer.get('pub') if isinstance(peer.get('pub'), dict) else None
-        fp, verified = '', False
-        if pub:
-            fp = hub_fp_of(pub)
-            claimed = str(peer.get('fp') or '')[:24]
-            if claimed and claimed != fp:
-                return self._json({'ok': False, 'error': '对方指纹和公钥对不上'}, 400)
-            ts = int(body.get('ts') or 0)
-            nonce = str(body.get('nonce') or '')[:64]
-            if not hub_link_fresh(ts):
-                return self._json({'ok': False, 'error': '回执已过期'}, 400)
-            canon = 'link-ok|' + rid + '|' + pid + '|' + purl + '|' + key + '|' + str(ts) + '|' + nonce
-            if not hub_verify(pub, canon, str(body.get('sig') or '')):
-                return self._json({'ok': False, 'error': '对方中枢签名验证失败'}, 400)
-            verified = True
-        with HUB_PEER_LOCK:
-            HUB_LINK_OUT[rid]['status'] = 'linked'
-            HUB_LINK_OUT[rid]['verified'] = verified
-        if not hub_peer_add(pid, purl, peer.get('name'), key, pub, fp, verified):
+            out['status'] = 'linked'
+        if not hub_peer_add(peer.get('id'), peer.get('url'), peer.get('name'), key,
+                            pubUrl=peer.get('pubUrl') or '',
+                            **hub_link_verify_peer(rid, key, peer)):
             return self._json({'ok': False, 'error': '对方地址不对'}, 400)
-        return self._json({'ok': True, 'verified': verified})
+        v = hub_link_verify_peer(rid, key, peer)
+        return self._json({'ok': True, 'verified': bool(v.get('verified')), 'error': v.get('error') or ''})
 
     def _hub_link_reject(self):
         body = self._body() or {}
@@ -2968,18 +2880,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self._json({'ok': False, 'error': '地址要 http:// 或 https://'}, 400)
         own = hub_link_info()
         rid = hashlib.sha1(os.urandom(16)).hexdigest()[:16]
-        ts = int(time.time())
-        nonce = hashlib.sha1(os.urandom(12)).hexdigest()[:24]
-        payload = {'reqId': rid, 'fromId': own['id'], 'fromUrl': own['url'],
-                   'fromName': own['name'], 'ts': ts, 'nonce': nonce}
-        if own.get('pub'):
-            payload.update({'fromPub': own['pub'], 'fromFp': own.get('fp'),
-                            'sig': hub_sign('link-req|' + rid + '|' + str(own['id']) + '|' +
-                                            str(own['url']) + '|' + str(ts) + '|' + nonce)})
         try:
-            r = hub_http_json(url + '/__hub/link/request', payload)
+            r = hub_http_json(url + '/__hub/link/request',
+                              hub_link_signed_request(rid, own['id'], own['url'], own['name']))
         except Exception as e:
-            return self._json({'ok': False, 'error': '连不上对方中枢：' + str(e)[:80]}, 502)
+            detail = ''
+            try:
+                detail = getattr(e, 'read', lambda: b'')().decode('utf-8', 'replace')[:300]
+            except Exception:
+                detail = ''
+            return self._json({'ok': False, 'error': '连不上对方中枢：' + str(e)[:80] + (' ' + detail if detail else '')}, 502)
         if not r.get('ok'):
             return self._json({'ok': False, 'error': r.get('error') or '对方拒绝了申请'}, 400)
         with HUB_PEER_LOCK:
@@ -3189,82 +3099,6 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             items = [{'id': k, 'name': v} for k, v in (FRIENDS.get(me) or {}).items()]
         return self._json({'ok': True, 'friends': items})
 
-    def _voice_ws(self):
-        from urllib.parse import unquote
-        upgrade = self.headers.get('Upgrade') or ''
-        key = (self.headers.get('Sec-WebSocket-Key') or '').strip()
-        if 'websocket' not in upgrade.lower() or not key:
-            return self._json({'ok': False, 'error': '需要 WebSocket 升级'}, 400)
-        q = self._query()
-        call = unquote(str(q.get('call') or '')).strip()[:64]
-        cid = unquote(str(q.get('id') or '')).strip()[:64]
-        name = unquote(str(q.get('name') or '')).strip()[:24] or '成员'
-        if not call or not cid:
-            return self._json({'ok': False, 'error': '缺少 call/id'}, 400)
-        with VOICE_LOCK:
-            room = VOICE_ROOMS.setdefault(call, {})
-            if len(room) >= 8:
-                return self._json({'ok': False, 'error': '语音房满了'}, 409)
-
-        self.send_response(101, 'Switching Protocols')
-        self.send_header('Upgrade', 'websocket')
-        self.send_header('Connection', 'Upgrade')
-        self.send_header('Sec-WebSocket-Accept', _ws_accept_key(key))
-        self.end_headers()
-        self.close_connection = True
-        try:
-            self.connection.settimeout(60)
-        except Exception:
-            pass
-
-        conn = VoiceConn(self, call, cid, name)
-        with VOICE_LOCK:
-            VOICE_ROOMS.setdefault(call, {})[cid] = conn
-            peers = [c for c in VOICE_ROOMS[call].values() if c.id != cid]
-        try:
-            conn.send(0x1, json.dumps({'t': 'voice-joined', 'peers': [c.id for c in peers]}).encode('utf-8'))
-        except Exception:
-            pass
-        for c in peers:
-            try:
-                c.send(0x1, json.dumps({'t': 'voice-peer', 'id': cid, 'name': name, 'joined': True}, ensure_ascii=False).encode('utf-8'))
-            except Exception:
-                pass
-
-        try:
-            while conn.alive:
-                op, data = _ws_recv(self.rfile)
-                if op == 0x8:
-                    break
-                if op == 0x9:
-                    conn.send(0xA, data)
-                    continue
-                if op not in (0x1, 0x2):
-                    continue
-                if len(data) > 4096:          # 只收小帧：PCM 一帧 ~1.4KB
-                    continue
-                conn.rx += 1
-                with VOICE_LOCK:
-                    room2 = VOICE_ROOMS.get(call) or {}
-                    targets = [c for c in room2.values() if c.id != cid]
-                for c in targets:
-                    c.send(op, data)
-        except Exception:
-            pass
-        finally:
-            conn.alive = False
-            with VOICE_LOCK:
-                room3 = VOICE_ROOMS.get(call) or {}
-                room3.pop(cid, None)
-                if not room3:
-                    VOICE_ROOMS.pop(call, None)
-                left = list(room3.values())
-            for c in left:
-                try:
-                    c.send(0x1, json.dumps({'t': 'voice-peer', 'id': cid, 'joined': False}).encode('utf-8'))
-                except Exception:
-                    pass
-
     def _room_ws(self):
         if not hub_open():
             return self._json({'ok': False, 'error': '中枢已关闭'}, 503)
@@ -3446,6 +3280,106 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 pass
             room_push_roster(code)
 
+    def _hub_relay_find(self):
+        """串联中枢来问：你这边有没有人在等这个 pair？"""
+        body = self._body() or {}
+        pair = str(body.get('pair') or '')[:96]
+        fromid = str(body.get('from') or '')[:64]
+        try:
+            ts = int(body.get('ts') or 0)
+        except Exception:
+            ts = 0
+        sig = str(body.get('sig') or '')[:64]
+        peer = hub_peer_by_id(fromid)
+        if not peer or not pair:
+            return self._json({'ok': False, 'error': '不是已串联的中枢'}, 403)
+        if abs(time.time() - ts) > 120:
+            return self._json({'ok': False, 'error': '时间戳过期'}, 403)
+        if hub_relay_sig(peer.get('key'), hub_relay_canon('relay-find', pair, fromid, ts)) != sig:
+            return self._json({'ok': False, 'error': '签名不对'}, 403)
+        w = relay_waiting(pair)
+        if w is None:
+            return self._json({'ok': True, 'waiting': 0})
+        return self._json({'ok': True, 'waiting': 1, 'mid': w.id, 'name': w.name})
+
+    def _hub_relay_attach(self):
+        """另一个中枢连过来当「虚拟对端」：把它的客户端和本机等的那个客户端桥起来。"""
+        from urllib.parse import unquote
+        q = self._query()
+        pair = unquote(str(q.get('pair') or '')).strip()[:96]
+        fromid = unquote(str(q.get('from') or '')).strip()[:64]
+        cmid = unquote(str(q.get('cmid') or '')).strip()[:64]
+        cname = unquote(str(q.get('cname') or '')).strip()[:32]
+        try:
+            ts = int(q.get('ts') or 0)
+        except Exception:
+            ts = 0
+        sig = str(q.get('sig') or '')[:64]
+        peer = hub_peer_by_id(fromid)
+        if not peer or not pair or not cmid:
+            return self._json({'ok': False, 'error': '参数不全或不是已串联中枢'}, 403)
+        if abs(time.time() - ts) > 120:
+            return self._json({'ok': False, 'error': '时间戳过期'}, 403)
+        if hub_relay_sig(peer.get('key'), hub_relay_canon('relay-attach', pair, fromid, ts, cmid)) != sig:
+            return self._json({'ok': False, 'error': '签名不对'}, 403)
+        local = relay_waiting(pair)
+        if local is None:
+            return self._json({'ok': False, 'error': '本机没有在等这个 pair 的客户端'}, 409)
+        upgrade = self.headers.get('Upgrade') or ''
+        key = (self.headers.get('Sec-WebSocket-Key') or '').strip()
+        if 'websocket' not in upgrade.lower() or not key:
+            return self._json({'ok': False, 'error': '需要 WebSocket 升级'}, 400)
+        self.send_response(101, 'Switching Protocols')
+        self.send_header('Upgrade', 'websocket')
+        self.send_header('Connection', 'Upgrade')
+        self.send_header('Sec-WebSocket-Accept', _ws_accept_key(key))
+        self.end_headers()
+        self.close_connection = True
+        try:
+            self.connection.settimeout(ROOM_SOCK_TIMEOUT)
+        except Exception:
+            pass
+        conn = RoomConn(self, pair, cmid, cname)
+        conn.virtual = True
+        with RELAY_LOCK:
+            RELAY.setdefault(pair, {})[cmid] = conn
+        _relay_log('fed attach pair=%s from=%s cmid=%s' % (pair, fromid, cmid))
+        try:
+            local.send_json({'t': 'relay-peer', 'id': cmid, 'name': cname})
+        except Exception:
+            pass
+        try:
+            while conn.alive:
+                op, data = _ws_recv(self.rfile)
+                if op == 0x8:
+                    break
+                if op == 0x9:
+                    conn.send(0xA, data)
+                    continue
+                if op in (0x1, 0x2):
+                    target = relay_other(pair, cmid)
+                    if target is not None:
+                        try:
+                            target.send(op, data)
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+        finally:
+            with RELAY_LOCK:
+                slot = RELAY.get(pair) or {}
+                if slot.get(cmid) is conn:
+                    slot.pop(cmid, None)
+            conn.alive = False
+            try:
+                conn.send(0x8, b'')
+            except Exception:
+                pass
+            try:
+                local.send_json({'t': 'relay-peer-off', 'id': cmid})
+            except Exception:
+                pass
+
     def _relay_ws(self):
         """一对一的兜底中继：两端各自的 id 不同，pair 相同，就把帧转给另一端。"""
         if not hub_open():
@@ -3459,6 +3393,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         from urllib.parse import unquote
         q = self._query()
         pair = unquote(str(q.get('pair') or '')).strip()[:96]
+        # 备用频道键：两边算法不一致时（一边指纹版、一边 id 版）靠它配对
+        alt = unquote(str(q.get('alt') or '')).strip()[:96]
         mid = unquote(str(q.get('id') or '')).strip()[:64]
         name = unquote(str(q.get('name') or '')).strip()[:32]
         if not pair or not mid:
@@ -3478,16 +3414,37 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             slot = RELAY.setdefault(pair, {})
             old = slot.get(mid)
             slot[mid] = conn
-        _relay_log('join pair=%s id=%s name=%s peer=%s' % (pair, mid, name, 'yes' if relay_other(pair, mid) is not None else 'no'))
+            if alt and alt != pair:
+                slot2 = RELAY.setdefault(alt, {})
+                if slot2.get(mid) is None:
+                    slot2[mid] = conn
+        def _relay_peer():
+            x = relay_other(pair, mid)
+            if x is None and alt:
+                x = relay_other(alt, mid)
+            return x
+        _relay_log('join pair=%s alt=%s id=%s name=%s peer=%s' % (pair, alt, mid, name, 'yes' if _relay_peer() is not None else 'no'))
         if old is not None:
             try:
                 old.close_socket('你在别处重新连了')
             except Exception:
                 pass
-        peer = relay_other(pair, mid)
+        peer = _relay_peer()
         if peer is not None:
             try:
                 peer.send_json({'t': 'relay-peer', 'id': mid, 'name': name})
+            except Exception:
+                pass
+            # 关键：后进来的一端也要知道自己配上了。只通知老的一端的话，
+            # 新来的那条连接永远收不到 relay-peer，客户端就不会收敛掉多余的中继候选。
+            try:
+                conn.send_json({'t': 'relay-peer', 'id': peer.id, 'name': peer.name})
+            except Exception:
+                pass
+        else:
+            # 本机没人等这个 pair：试试串联中枢那边（中枢间转发）
+            try:
+                _fed_try(pair, conn)
             except Exception:
                 pass
         try:
@@ -3501,7 +3458,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 if op not in (0x1, 0x2):
                     continue
                 conn.rx = time.time()
-                peer = relay_other(pair, mid)
+                peer = _relay_peer()
                 if peer is not None:
                     try:
                         peer.send(op, data)
@@ -3516,12 +3473,18 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     slot.pop(mid, None)
                     if not slot:
                         RELAY.pop(pair, None)
+                if alt and alt != pair:
+                    slot2 = RELAY.get(alt)
+                    if slot2 is not None and slot2.get(mid) is conn:
+                        slot2.pop(mid, None)
+                        if not slot2:
+                            RELAY.pop(alt, None)
             conn.alive = False
             try:
                 conn.send(0x8, b'')
             except Exception:
                 pass
-            peer = relay_other(pair, mid)
+            peer = _relay_peer()
             if peer is not None:
                 try:
                     peer.send_json({'t': 'relay-peer-off', 'id': mid})
@@ -3697,6 +3660,28 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         msg_add(m)
         return self._json({'ok': True, 'msg': m})
 
+    def _msg_offline_post(self):
+        if not hub_open():
+            return self._json({'ok': False, 'error': '中枢已关闭'}, 503)
+        body = self._body() or {}
+        n = hub_offline_post(body.get('to'), body.get('from'), body.get('env'), body.get('ttl'))
+        if not n:
+            return self._json({'ok': False, 'error': '参数不对或信封太大'}, 400)
+        return self._json({'ok': True, 'stored': 1})
+
+    def _msg_offline_poll(self):
+        to = ''
+        try:
+            q = self.path.split('?', 1)[1] if '?' in self.path else ''
+            for kv in q.split('&'):
+                if kv.startswith('id='):
+                    to = kv[3:]
+        except Exception:
+            to = ''
+        rows = hub_offline_poll(to)
+        items = [{'from': r.get('from'), 'env': r.get('env'), 'at': r.get('at')} for r in rows]
+        return self._json({'ok': True, 'items': items, 'count': len(items)})
+
     def _msg_del(self):
         if not hub_admin_ok(self):
             return self._json({'ok': False, 'error': '只有团长能删'}, 403)
@@ -3811,20 +3796,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
     def do_GET(self):
         path = self.path.split('?')[0]
-        if self._public_denied(path):
-            try:
-                _guard_note(self._req_ip(), path, 403)
-            except Exception:
-                pass
-            return self._json({'ok': False, 'error': '公网只开放搭桥/房间/语音接口'}, 403)
 
         # 中枢控制台
-        if path == '/__store/list':
-            if not hub_admin_ok(self):
-                return self._json({'ok': False, 'error': '只有本机能看磁盘备份'}, 403)
-            return self._json({'ok': True, 'files': _store_list()})
-        if path == '/__store/get':
-            return self._store_get()
         if path == '/__hub/state':
             return self._hub_state()
         if path == '/__hub/link/info':
@@ -3840,15 +3813,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if path == '/__hub/conns':
             return self._hub_conns_get()
 
-        # 语音中继（通话用，纯 TCP）
-        if path == '/__voice':
-            return self._voice_ws()
-
         # 社团中枢（WebSocket 中转）
         if path == '/__room/ws':
             return self._room_ws()
         if path == '/__relay/ws':
             return self._relay_ws()
+        if path == '/__hub/relay/attach':
+            return self._hub_relay_attach()
         if path == '/__room/info':
             return self._room_info()
         if path == '/__room/list':
@@ -3898,10 +3869,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 'open': hub_open(),
                 'door': hub_door_open(),
                 'name': (hub_cfg().get('name') or ''),
-                'hubPub': HUB_KEY.get('pub'),
-                'hubFp': HUB_KEY.get('fp'),
                 'cfg': hub_cfg(),
-                'turn': (HUB_CFG.get('turn') or []),
+                **hub_identity(),
             })
 
         # 论坛 / 资源库 / 联机社团
@@ -3918,15 +3887,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
         # 听书：语音能力查询 + 音频文件
         if path == '/__tts/info':
-            if not self._loopback():
-                return self._json({'ok': False, 'error': '听书只在本机可用'}, 403)
             if not tts_guest_ok(self):
                 return self._json({'ok': False, 'error': '需要口令'}, 403)
             return self._json({
                 'ok': True,
                 'edge': bool(_edge),
                 'local': bool(tts_local_cfg()),
-                'alive': tts_local_alive(),
                 'voice': TTS_VOICE,
                 'rate': TTS_RATE,
             })
@@ -3952,28 +3918,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 pass
             return
 
-        if path == '/__lan/hubs':
-            # 局域网里广播过的中枢（含手机中枢）。客户端地址失效时靠它自愈。
-            now3 = time.time()
-            out = []
-            with SIGNAL_LOCK:
-                for ip, v in list(LAN_HUBS.items()):
-                    if now3 - v.get('at', 0) > 120:
-                        LAN_HUBS.pop(ip, None)
-                        continue
-                    out.append({'url': v.get('url', ''), 'name': v.get('name', ''), 'ip': ip,
-                                'id': v.get('id', ''), 'fp': v.get('fp', ''),
-                                'age': int(now3 - v.get('at', now3))})
-            body = json.dumps({'ok': True, 'hubs': out}, ensure_ascii=False).encode('utf-8')
-            try:
-                self.send_response(200)
-                self.send_header('Content-Type', 'application/json; charset=utf-8')
-                self.send_header('Content-Length', str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-            except Exception:
-                pass
-            return
+        if path == '/__msg/offline/poll':
+            return self._msg_offline_poll()
 
         if path == '/__lan/peers':
             q = self._query()
@@ -4113,14 +4059,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
     # ---------- POST ----------
     def do_POST(self):
-        global TTS_USER_STOPPED, TTS_LAST_USE
         path = self.path.split('?')[0]
-        if self._public_denied(path):
-            try:
-                _guard_note(self._req_ip(), path, 403)
-            except Exception:
-                pass
-            return self._json({'ok': False, 'error': '公网只开放搭桥/房间/语音接口'}, 403)
         # 公网防刷：只对资源重的写端点限流，回环/反代后的真实 IP 计
         try:
             if not _post_rate_ok(self, path, time.time()):
@@ -4128,9 +4067,6 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         except Exception:
             pass
 
-        # 本机文件磁盘兜底
-        if path == '/__store':
-            return self._store_put()
         # 中枢控制台
         if path == '/__hub/state':
             return self._hub_set()
@@ -4152,6 +4088,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self._hub_conns_post()
         if path == '/__hub/presence':
             return self._hub_presence()
+        if path == '/__hub/relay/find':
+            return self._hub_relay_find()
         if path == '/__hub/link/request':
             return self._hub_link_request()
         if path == '/__hub/link/approve':
@@ -4176,6 +4114,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self._msg_post()
         if path == '/__msg/del':
             return self._msg_del()
+        if path == '/__msg/offline':
+            return self._msg_offline_post()
+        if path == '/__msg/offline/poll':
+            return self._msg_offline_poll()
 
         # 社团中枢：建房
         if path == '/__room/new':
@@ -4360,31 +4302,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             packs_save(keep)
             return self._json({'ok': True})
 
-        # 听书：手动预热本地语音（前端进「听书」时如果 local=true 但 alive=false 就调这个）
-        if path == '/__tts/start':
-            if not self._loopback():
-                return self._json({'ok': False, 'error': '听书只在本机可用'}, 403)
-            if not tts_guest_ok(self):
-                return self._json({'ok': False, 'error': '需要口令'}, 403)
-            TTS_USER_STOPPED = False
-            TTS_LAST_USE = time.time()
-            started = ensure_local_tts()
-            return self._json({'ok': True, 'starting': bool(started), 'alive': tts_local_alive()})
-
-        if path == '/__tts/stop':
-            if not tts_guest_ok(self):
-                return self._json({'ok': False, 'error': '需要口令'}, 403)
-            stopped = tts_stop_local(True)
-            return self._json({'ok': True, 'stopped': bool(stopped), 'alive': tts_local_alive()})
-
         # 听书：合成一段文字（本地服务优先，其次 edge-tts，都带磁盘缓存）
         if path == '/__tts':
-            if not self._loopback():
-                return self._json({'ok': False, 'error': '听书只在本机可用'}, 403)
             if not tts_guest_ok(self):
                 return self._json({'ok': False, 'error': '需要口令'}, 403)
-            TTS_USER_STOPPED = False
-            TTS_LAST_USE = time.time()
             data = self._body()
             text = str(data.get('text') or '').strip()[:800]
             if not text:
@@ -4447,16 +4368,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         return self._json({'ok': True, 'url': '/__tts/%s%s' % (key, ext), 'local': True})
                 except Exception as e:
                     tts_log('本地失败 lang=%s 文本长=%d md5=%s：%s' % (lang or 'zh', len(text), hashlib.md5(text.encode('utf-8')).hexdigest()[:8], str(e)[:80]))
-                    # 服务没在跑就顺手拉起来（60 秒内只拉一次），并让前端等模型加载
-                    _started = ensure_local_tts()
-                    if tts_local_alive():
-                        tts_warm_reset()
-                    if _started or time.time() < TTS_WARM_UNTIL:
-                        return self._json({'ok': False, 'warming': True, 'fallback': 'none',
-                                           'error': '本地语音正在启动，约 30 秒后再试'}, 503)
                     if _strict:
                         return self._json({'ok': False, 'fallback': 'none',
-                                           'error': '本地语音没起来（9880 没开，可点「启动语音.bat」）'}, 503)
+                                           'error': '本地语音这次没合成出来'}, 503)
+                    if time.time() < TTS_WARM_UNTIL:
+                        return self._json({'ok': False, 'warming': True,
+                                           'error': '本地语音正在加载'}, 503)
                     pass  # 本地服务挂了就退回在线
 
             if _cfg and _want_local:
@@ -4517,6 +4434,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 LAN_HI.setdefault(to, []).append({
                     'kind': 'ack',
                     'accept': bool(data.get('accept')),
+                    'card': str(data.get('card') or '')[:4000],
                     'from': {'id': str(frm.get('id')), 'name': str(frm.get('name') or ''),
                              'avatar': str(frm.get('avatar') or '')},
                     'at': time.time(),
@@ -4550,10 +4468,18 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             with SIGNAL_LOCK:
                 LAN_HI.setdefault(to, []).append({
                     'kind': 'req',
+                    'card': str(data.get('card') or '')[:4000],
                     'from': {'id': str(frm.get('id')), 'name': str(frm.get('name') or ''),
                              'avatar': str(frm.get('avatar') or '')},
                     'at': time.time(),
                 })
+                if len(LAN_HI[to]) > 40:
+                    LAN_HI[to] = LAN_HI[to][-40:]
+                # 防止被刷出一堆收件箱键（每个键只活 10 分钟，这里再兜一层）
+                if len(LAN_HI) > 3000:
+                    for _k in list(LAN_HI.keys())[:1000]:
+                        if _k != to:
+                            LAN_HI.pop(_k, None)
                 if len(LAN_HI[to]) > 50:
                     LAN_HI[to] = LAN_HI[to][-50:]
             return self._json({'ok': True})
@@ -4689,48 +4615,6 @@ def _cf_exe_path():
     return ''
 
 
-# ---------------- 本机文件磁盘兜底（/__store） ----------------
-# 文件一直只存在浏览器的 IndexedDB 里，清一次就没了（见交接 §AR）。
-# 这里给本机中枢加一份磁盘副本：收到/导入/下载时顺手落盘，IDB 丢了还能找回来。
-STORE_DIR = os.path.join(HUB_DATA_DIR, 'store')
-STORE_MAX = 1024 * 1024 * 512      # 单文件上限 512 MB
-
-
-def _store_path(name):
-    """把外面传进来的名字收窄成一个安全文件名（带路径的直接拒，不做归一）。"""
-    raw = str(name or '')
-    if '..' in raw or '/' in raw or '\\' in raw:
-        return ''
-    base = raw
-    for ch in ':*?"<>|\r\n\t':
-        base = base.replace(ch, '')
-    base = base.strip().strip('.').strip()
-    if not base:
-        return ''
-    if len(base) > 120:
-        root, ext = os.path.splitext(base)
-        base = root[:max(1, 120 - len(ext))] + ext
-    return os.path.join(STORE_DIR, base)
-
-
-def _store_list():
-    out = []
-    try:
-        for fn in os.listdir(STORE_DIR):
-            p = os.path.join(STORE_DIR, fn)
-            try:
-                if not os.path.isfile(p):
-                    continue
-                st = os.stat(p)
-            except Exception:
-                continue
-            out.append({'name': fn, 'size': st.st_size, 'ts': int(st.st_mtime * 1000)})
-    except Exception:
-        pass
-    out.sort(key=lambda x: x['ts'], reverse=True)
-    return out
-
-
 def public_tunnel_state():
     return {'on': bool(PUBLIC_PROC and PUBLIC_PROC.poll() is None), 'url': PUBLIC_URL}
 
@@ -4750,14 +4634,7 @@ def public_tunnel_stop():
 
 
 def public_tunnel_start():
-    """起 cloudflared 隧道，返回 (ok, url)
-
-    固定域名模式（地址永远不变，推荐）：
-      set HLJJS_TUNNEL_TOKEN=...   # cloudflared 控制台里那条隧道的 token（优先）
-      set HLJJS_TUNNEL_NAME=myhub  # 或者用本机已登录的命名隧道名字
-      set HLJJS_PUBLIC_URL=https://hub.example.com   # 界面上显示/分享的固定地址
-    都没配就退回免费快速隧道（每次启动换地址）。
-    """
+    """起 cloudflared 快速隧道，返回 (ok, url)"""
     global PUBLIC_PROC, PUBLIC_URL
     with PUBLIC_LOCK:
         if PUBLIC_PROC and PUBLIC_PROC.poll() is None and PUBLIC_URL:
@@ -4765,53 +4642,23 @@ def public_tunnel_start():
         exe = _cf_exe_path()
         if not exe:
             return False, '没找到 cloudflared.exe'
-        token = (os.environ.get('HLJJS_TUNNEL_TOKEN') or '').strip()
-        tname = (os.environ.get('HLJJS_TUNNEL_NAME') or '').strip()
-        fixed = (os.environ.get('HLJJS_PUBLIC_URL') or '').strip().rstrip('/')
-        named = bool(token or tname)
-        if token:
-            argv = [exe, 'tunnel', '--no-autoupdate', 'run', '--token', token]
-        elif tname:
-            argv = [exe, 'tunnel', '--no-autoupdate', 'run', tname]
-        else:
-            argv = [exe, 'tunnel', '--url', 'http://127.0.0.1:%d' % PORT, '--no-autoupdate']
         try:
-            p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+            p = subprocess.Popen([exe, 'tunnel', '--url', 'http://127.0.0.1:%d' % PORT, '--no-autoupdate'],
+                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
         except Exception as e:
             return False, str(e)
         url = ''
-        if named:
-            # 命名隧道地址是固定的：以 HLJJS_PUBLIC_URL 为准（没配就沿用上次记下的）
-            url = fixed
-            if not url:
-                try:
-                    url = (open(os.path.join(HUB_DATA_DIR, 'public-url.txt'), encoding='utf-8').read() or '').strip()
-                except Exception:
-                    url = ''
-            if not url:
-                try:
-                    for _ in range(20):
-                        line = p.stdout.readline()
-                        if not line:
-                            break
-                        m = re.findall(r'https://[a-z0-9.-]+', line or '')
-                        if m:
-                            url = m[0]
-                            break
-                except Exception:
-                    pass
-        else:
-            try:
-                for _ in range(80):
-                    line = p.stdout.readline()
-                    if not line:
-                        break
-                    m = re.findall(r'https://[a-z0-9-]+\.trycloudflare\.com', line or '')
-                    if m:
-                        url = m[0]
-                        break
-            except Exception:
-                pass
+        try:
+            for _ in range(80):
+                line = p.stdout.readline()
+                if not line:
+                    break
+                m = re.findall(r'https://[a-z0-9-]+\.trycloudflare\.com', line or '')
+                if m:
+                    url = m[0]
+                    break
+        except Exception:
+            pass
         PUBLIC_PROC = p
         PUBLIC_URL = url
         def _drain():
@@ -4867,59 +4714,11 @@ def start_public_tunnel():
     return p
 
 
-def _port_taken(port):
-    """这个端口上是不是已经有人在听（纯 TCP 探活，不依赖 HTTP 正常）。"""
-    try:
-        with socket.create_connection(('127.0.0.1', port), timeout=0.8):
-            return True
-    except OSError:
-        return False
-
-
-def _hub_alive(port):
-    """端口上那个东西是不是一个活着的中枢（/__info 有响应）。"""
-    try:
-        with urllib.request.urlopen('http://127.0.0.1:%d/__info' % port, timeout=1.5) as r:
-            return r.status == 200
-    except Exception:
-        return False
-
-
 if __name__ == "__main__":
-    # 防重复 bind：Server 是 allow_reuse_address=True，Windows 的 SO_REUSEADDR 允许
-    # 直接抢同一端口——重复双击「启动.bat」会变成两个中枢各拿一半连接（房间/信令分叉）。
-    # 要故意再开一个（比如临时换个端口做实验）：set HLJJS_ALLOW_DUP=1
-    if not os.environ.get('HLJJS_ALLOW_DUP') and _port_taken(PORT):
-        if _hub_alive(PORT):
-            print('')
-            print('  中枢已经在运行：http://127.0.0.1:%d/' % PORT)
-            print('  不用再开一个（重复开会变成两个中枢抢同一批连接）。')
-        else:
-            print('')
-            print('  端口 %d 被别的程序占着，而且它不是中枢。' % PORT)
-        print('  要强行再开：set HLJJS_ALLOW_DUP=1 然后重跑。')
-        print('')
-        sys.exit(0)
     # 本地语音（9880）已迁出：不再随中枢启动，改由「启动语音.bat」独立管理
     rooms_load()
     try:
-        threading.Thread(target=tts_watchdog_loop, daemon=True).start()
-    except Exception:
-        pass
-    try:
         threading.Thread(target=lan_beacon_loop, daemon=True).start()
-    except Exception:
-        pass
-    try:
-        threading.Thread(target=lan_hub_listen_loop, daemon=True).start()
-    except Exception:
-        pass
-    try:
-        threading.Thread(target=hub_peer_heal_loop, daemon=True).start()
-    except Exception:
-        pass
-    try:
-        threading.Thread(target=hub_autolink_loop, daemon=True).start()
     except Exception:
         pass
     try:
@@ -4928,11 +4727,9 @@ if __name__ == "__main__":
         pass
     ip = lan_ip()
     v6 = global_ipv6()
-    # 想只给本机用（不暴露到局域网）：HLJJS_BIND=127.0.0.1
-    _bind_env = (os.environ.get('HLJJS_BIND') or '').strip()
     # 手机上（Termux）不一定能绑 IPv6，失败就退回 IPv4
     try:
-        _srv = Server((_bind_env or "::", PORT), Handler)
+        _srv = Server(("::", PORT), Handler)
     except OSError:
         class _Server4(socketserver.ThreadingTCPServer):
             allow_reuse_address = True

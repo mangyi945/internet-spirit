@@ -133,7 +133,7 @@ if (Test-Path $libDir) {
   $btJar = Join-Path $web '_deps\bt\libtorrent4j.jar'
   if (-not (Test-Path $btJar)) { throw ('缺少 libtorrent4j.jar：' + $btJar) }
   Write-Host '[3/6] javac'
-  & $javac -encoding UTF-8 -source 8 -target 8 -bootclasspath $aj -classpath $btJar -d obj src\com\hljjs\app\MainActivity.java src\com\hljjs\app\TorrentBridge.java src\com\hljjs\app\BtService.java src\com\hljjs\app\TransferService.java src\com\hljjs\app\PcIme.java src\com\hljjs\app\SharedProvider.java src\com\hljjs\app\DirectLink.java src\com\hljjs\app\MediaService.java src\com\hljjs\app\BrowserActivity.java src\com\hljjs\app\BtBridge.java src\com\hljjs\app\KeepAliveService.java src\com\hljjs\app\VpnDnsService.java src\com\hljjs\app\LocalProxy.java src\com\hljjs\app\MsgNotify.java
+  & $javac -encoding UTF-8 -source 8 -target 8 -bootclasspath $aj -classpath $btJar -d obj src\com\hljjs\app\MainActivity.java src\com\hljjs\app\TorrentBridge.java src\com\hljjs\app\BtStreamServer.java src\com\hljjs\app\BtService.java src\com\hljjs\app\TransferService.java src\com\hljjs\app\PcIme.java src\com\hljjs\app\SharedProvider.java src\com\hljjs\app\DirectLink.java src\com\hljjs\app\MediaService.java src\com\hljjs\app\BrowserActivity.java src\com\hljjs\app\BtBridge.java src\com\hljjs\app\KeepAliveService.java src\com\hljjs\app\VpnDnsService.java src\com\hljjs\app\LocalProxy.java src\com\hljjs\app\MsgNotify.java
   if ($LASTEXITCODE -ne 0) { throw 'javac 失败' }
 
   Write-Host '[4/6] d8'

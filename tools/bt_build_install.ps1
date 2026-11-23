@@ -21,8 +21,8 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
-if ($env:HLJJS_NODE_DIR) { $env:PATH = $env:HLJJS_NODE_DIR + ';' + $env:PATH }   # 需要 node 就设 HLJJS_NODE_DIR
-$py = if ($env:HLJJS_PY) { $env:HLJJS_PY } else { 'python' }
+$env:PATH = 'C:\Users\芒\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\node\bin;' + $env:PATH
+$py = 'C:\Users\芒\AppData\Local\Programs\Python\Python314\python.exe'
 $index = Join-Path $root 'index.html'
 $apk = Join-Path $root '互联网精神与世长存-0.apk'
 
@@ -44,6 +44,16 @@ if ($LASTEXITCODE -ne 0) { throw 'syntax_check 失败' }
 Write-Host '=== [3/6] 同步资源 ===' -ForegroundColor Cyan
 Copy-Item $index (Join-Path $root '_deps\pack\assets\index.html') -Force
 if (Test-Path (Join-Path $root 'ios\www')) { Copy-Item $index (Join-Path $root 'ios\www\index.html') -Force }
+# serve.py 必须一起同步：手机上的中枢直接跑打包进来的这份（以前漏了同步，
+# 结果装新 APK 后手机还在跑几天前的旧 serve.py，缺字段/缺修复）
+$serveSrc = Join-Path $root 'serve.py'
+if (Test-Path $serveSrc) {
+    Copy-Item $serveSrc (Join-Path $root '_deps\pack\assets\serve.py') -Force
+# hubid.py 也要一起同步：手机中枢要用它生成 P-256 身份
+$hubidSrc = Join-Path $root 'hubid.py'
+if (Test-Path $hubidSrc) { Copy-Item $hubidSrc (Join-Path $root '_deps\pack\assets\hubid.py') -Force; Write-Host 'hubid.py 已同步进 _deps\pack\assets' }
+    Write-Host 'serve.py 已同步进 _deps\pack\assets'
+}
 Write-Host 'ok'
 
 Write-Host '=== [4/6] 构建 APK ===' -ForegroundColor Cyan
@@ -84,7 +94,7 @@ if ($SkipInstall) {
         $upd = (& $adb -s $serial shell dumpsys package com.hljjs.app 2>&1 | Select-String 'lastUpdateTime').Line
         Write-Host "装机: $upd"
     } else {
-        Write-Host '⚠ 没检测到设备，装机可能失败' -ForegroundColor Yellow
+        Write-Host '⚠ 没检测到设备，跳过装机（APK 已生成，设备上线后手动装）' -ForegroundColor Yellow
     }
 }
 Write-Host '=== 完成 ===' -ForegroundColor Green
