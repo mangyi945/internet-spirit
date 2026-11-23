@@ -72,6 +72,10 @@ powershell -ExecutionPolicy Bypass -File android\build.ps1
 
 需要 JDK 17、Android SDK build-tools 34 + platform 34，默认路径写在 `build.ps1` 顶部，按自己机器改。产物在 `android` 上一级目录。
 
+## 许可
+
+MIT。商用、修改、再发布都行，保留版权声明和许可声明即可。
+
 ## 反馈
 
 开 issue。连不上、崩溃、界面错位都行，带上机型、系统版本和复现步骤就更快。
